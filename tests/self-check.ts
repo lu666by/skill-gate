@@ -8,6 +8,7 @@ import {
   dedupeCandidates,
   delegateText,
   installText,
+  inspectSource,
   packText,
   parseSkillsFind,
   safeRemove,
@@ -55,8 +56,17 @@ const fixtureRoot = join(process.cwd(), "fixtures");
 assert.equal(auditSkill(join(fixtureRoot, "safe-skill")).risk, "LOW");
 assert.equal(auditSkill(join(fixtureRoot, "scripted-skill")).risk, "HIGH");
 assert.equal(auditSkill(join(fixtureRoot, "malicious-skill")).capabilities.promptInjection, true);
+assert.notEqual(auditSkill(join(process.cwd(), "skills", "skill-gate")).risk, "HIGH");
 
 const temp = mkdtempSync(join(tmpdir(), "skill-gate-"));
+const badSkill = join(temp, "bad-skill");
+mkdirSync(badSkill, { recursive: true });
+writeFileSync(join(badSkill, "SKILL.md"), "---\nname: ../../escape\ndescription: bad\n---\n");
+assert.throws(() => inspectSource(badSkill, { cwd: temp, sessionId: "bad" }), /Invalid skill name/);
+assert.equal(existsSync(join(temp, ".skill-gate", "sessions", "escape")), false);
+writeFileSync(join(badSkill, "SKILL.md"), "---\nname: ..\\escape\ndescription: bad\n---\n");
+assert.throws(() => inspectSource(badSkill, { cwd: temp, sessionId: "bad-win" }), /Invalid skill name/);
+
 const session = join(temp, ".skill-gate", "sessions", "test");
 mkdirSync(join(session, "skills", "demo"), { recursive: true });
 writeFileSync(join(session, "skills", "demo", "SKILL.md"), "---\nname: demo\ndescription: demo\n---\n");
@@ -77,11 +87,59 @@ assert.equal(readdirSync(join(temp, ".skill-gate", "sessions")).length, 1);
 assert.equal(JSON.parse(readFileSync(join(session, "manifest.json"), "utf8")).approvedByUser, true);
 assert.match(installText("local", true, temp), /Installed pinned inspected skill/);
 assert.equal(existsSync(join(temp, ".skill-gate", "project-skills", "demo", "SKILL.md")), true);
-assert.match(cleanupSessions(temp), /requires user approval/);
+writeFileSync(join(session, "manifest.json"), JSON.stringify({
+  skill: "demo",
+  source: "local",
+  installCount: null,
+  commitSha: "local",
+  risk: "HIGH",
+  approvedByUser: false,
+  scope: "temporary",
+  createdFiles: [".skill-gate/sessions/test"]
+}));
+assert.throws(() => useText("local", true, temp), /HIGH risk/);
+assert.throws(() => installText("local", true, temp), /HIGH risk/);
+writeFileSync(join(session, "manifest.json"), JSON.stringify({
+  skill: "../../escape",
+  source: "local",
+  installCount: null,
+  commitSha: "local",
+  risk: "LOW",
+  approvedByUser: true,
+  scope: "temporary",
+  createdFiles: [".skill-gate/sessions/test"]
+}));
+assert.throws(() => installText("local", true, temp), /Invalid skill name/);
+assert.throws(() => useText("local", true, temp), /Invalid skill name/);
+assert.throws(() => packText("bad-pack", temp), /Invalid skill name/);
+assert.equal(existsSync(join(temp, "escape")), false);
+writeFileSync(join(session, "manifest.json"), JSON.stringify({
+  skill: "..\\escape",
+  source: "local",
+  installCount: null,
+  commitSha: "local",
+  risk: "LOW",
+  approvedByUser: true,
+  scope: "temporary",
+  createdFiles: [".skill-gate/sessions/test"]
+}));
+assert.throws(() => installText("local", true, temp), /Invalid skill name/);
+writeFileSync(join(session, "manifest.json"), JSON.stringify({
+  skill: "demo",
+  source: "local",
+  installCount: null,
+  commitSha: "local",
+  risk: "LOW",
+  approvedByUser: true,
+  scope: "temporary",
+  createdFiles: [".skill-gate/sessions/test"]
+}));
+assert.throws(() => cleanupSessions(temp), /requires user approval/);
 assert.equal(existsSync(session), true);
 assert.match(cleanupSessions(temp, true), /Removed 1/);
 assert.equal(existsSync(session), false);
 
 assert.throws(() => safeRemove(resolve(temp, ".skill-gate"), resolve(temp, "outside")), /Refusing/);
+assert.throws(() => safeRemove(resolve(temp, ".skill-gate"), resolve(temp, ".skill-gate")), /Refusing/);
 
 console.log("self-check ok");

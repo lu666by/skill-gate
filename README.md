@@ -90,6 +90,8 @@ For Codex, install it as a local plugin from this checkout. The plugin carries t
 
 ## Commands
 
+Local checkout examples use `node dist/src/cli.js <command>`. If the package bin is linked or globally installed, `skill-gate <command>` is equivalent.
+
 | Command | What it does |
 |---|---|
 | `recommend "<task>"` | Search real skill sources and return 0 to 3 candidates. |

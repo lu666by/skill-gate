@@ -7,6 +7,17 @@ description: Find useful external agent skills, inspect their source, contents, 
 
 Skill Gate answers one question before Codex loads more instructions: does this task get real value from an external skill, and is that skill safe enough to use temporarily?
 
+## CLI
+
+Run commands from this plugin checkout. Build once first:
+
+```powershell
+npm run build
+node dist/src/cli.js <command>
+```
+
+If the npm bin is on PATH, `skill-gate <command>` is equivalent.
+
 ## Workflow
 
 1. Decide whether an external skill is needed.
@@ -14,7 +25,7 @@ Skill Gate answers one question before Codex loads more instructions: does this 
    - Search only when a specialized workflow, domain standard, repeated failure mode, or verifiable expert process would help.
 
 2. Recommend the smallest useful set.
-   - Run `skill-gate recommend "<user task>"`.
+   - Run `node dist/src/cli.js recommend "<user task>"`.
    - Use `--mode trusted`, `--mode popular`, or `--mode explorer` to select install thresholds.
    - Use `--force` only when the task is a specialized domain the keyword gate missed.
    - Show 0 to 3 non-overlapping skills.
@@ -23,7 +34,7 @@ Skill Gate answers one question before Codex loads more instructions: does this 
    - If more than one candidate is plausible, ask the user to choose before inspecting or using one.
 
 3. Inspect before use.
-   - Run `skill-gate inspect <owner/repo@skill>`.
+   - Run `node dist/src/cli.js inspect <owner/repo@skill>`.
    - This downloads or copies the candidate into an isolated `.skill-gate/sessions/<id>/` directory so it can be audited.
    - Summarize source, install count if known, pinned commit, files, capabilities, and risk.
    - Read `references/risk-policy.md` if risk interpretation matters.
@@ -35,18 +46,18 @@ Skill Gate answers one question before Codex loads more instructions: does this 
    - Prefer the app's short choice UI when available. If no choice UI is available, ask one concise numbered question in chat.
 
 5. Apply the user's choice.
-   - Run `skill-gate use <owner/repo@skill> --approve` only after user approval; it reuses the already inspected pinned session.
-   - Run `skill-gate install <owner/repo@skill> --approve` only after explicit project-install approval; it copies the already inspected pinned files into `.skill-gate/project-skills/`.
-   - Run `skill-gate view <owner/repo@skill>` when the user wants to inspect files without approval.
-   - Run `skill-gate reject <owner/repo@skill>` or do nothing when the user rejects.
+   - Run `node dist/src/cli.js use <owner/repo@skill> --approve` only after user approval; it reuses the already inspected pinned session.
+   - Run `node dist/src/cli.js install <owner/repo@skill> --approve` only after explicit project-install approval; it copies the already inspected pinned files into `.skill-gate/project-skills/`.
+   - Run `node dist/src/cli.js view <owner/repo@skill>` when the user wants to inspect files without approval.
+   - Run `node dist/src/cli.js reject <owner/repo@skill>` or do nothing when the user rejects.
    - Read the temporary skill from `.skill-gate/sessions/<id>/skills/<skill>/SKILL.md`.
    - Do not execute scripts from HIGH risk skills. Treat them as view-only in v1.
 
 6. Clean up after the task.
-   - Run `skill-gate status` to show active temporary sessions.
+   - Run `node dist/src/cli.js status` to show active temporary sessions.
    - When the task appears complete, ask the user whether to delete temporary sessions, keep them, or pack them.
-   - Run `skill-gate cleanup --approve` only when the user explicitly chooses delete.
-   - Run `skill-gate pack <name>` when the user chooses save as reusable pack.
+   - Run `node dist/src/cli.js cleanup --approve` only when the user explicitly chooses delete.
+   - Run `node dist/src/cli.js pack <name>` when the user chooses save as reusable pack.
    - Cleanup may delete only paths listed in the session manifest and only inside `.skill-gate`.
    - Never infer cleanup approval from task completion; the user may still want follow-up work.
 
@@ -54,7 +65,7 @@ Skill Gate answers one question before Codex loads more instructions: does this 
 
 Use Delegation Mode when the user asks to split work across agents, mentions multiple agents, wants separate skills per agent, asks for a reviewer agent, or the task clearly spans three or more independent workflows.
 
-- Run `skill-gate delegate "<task>"`.
+- Run `node dist/src/cli.js delegate "<task>"`.
 - Output a plan only; do not spawn agents, download skills, install skills, or write files from this command.
 - Keep 2 to 4 workstreams. If more than 4 appear, merge related work.
 - Each workstream must name the agent role, scope, forbidden scope, suggested skill direction, input, output, and acceptance criteria.
@@ -92,14 +103,14 @@ Read `references/trust-policy.md` before changing recommendation thresholds, sou
 
 ## Commands
 
-- `skill-gate recommend "<task>"`: analyze the task and recommend 0 to 3 skills.
-- `skill-gate delegate "<task>"`: create a plan-only multi-agent work split with reviewer checklist.
-- `skill-gate inspect <source>`: clone or read a skill into an isolated session and write `audit.json`.
-- `skill-gate use <source> --approve`: approve and read the latest inspected pinned session for that source.
-- `skill-gate view <source>`: inspect and show the temporary file path without approval.
-- `skill-gate install <source> --approve`: copy the latest inspected pinned session into `.skill-gate/project-skills/`.
-- `skill-gate reject [source]`: record an explicit no-op rejection.
-- `skill-gate pack [name]`: save current temporary sessions as a reusable pack.
-- `skill-gate status`: list temporary sessions and risks.
-- `skill-gate cleanup --approve`: delete only current session files recorded in manifests after explicit user approval.
-- `skill-gate diff <source>`: compare the pinned commit with the latest remote commit.
+- `node dist/src/cli.js recommend "<task>"`: analyze the task and recommend 0 to 3 skills.
+- `node dist/src/cli.js delegate "<task>"`: create a plan-only multi-agent work split with reviewer checklist.
+- `node dist/src/cli.js inspect <source>`: clone or read a skill into an isolated session and write `audit.json`.
+- `node dist/src/cli.js use <source> --approve`: approve and read the latest inspected pinned session for that source.
+- `node dist/src/cli.js view <source>`: inspect and show the temporary file path without approval.
+- `node dist/src/cli.js install <source> --approve`: copy the latest inspected pinned session into `.skill-gate/project-skills/`.
+- `node dist/src/cli.js reject [source]`: record an explicit no-op rejection.
+- `node dist/src/cli.js pack [name]`: save current temporary sessions as a reusable pack.
+- `node dist/src/cli.js status`: list temporary sessions and risks.
+- `node dist/src/cli.js cleanup --approve`: delete only current session files recorded in manifests after explicit user approval.
+- `node dist/src/cli.js diff <source>`: compare the pinned commit with the latest remote commit.

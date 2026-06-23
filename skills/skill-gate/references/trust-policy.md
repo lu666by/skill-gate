@@ -8,8 +8,8 @@ Default mode is Popular:
 
 - Trusted: at least 10000 installs.
 - Popular: at least 1000 installs.
-- Explorer: no install threshold, but show-only by default.
+- Explorer: no install threshold; still requires inspect and explicit use/install approval.
 
-Filter out candidates that are archived, unverifiable, missing `SKILL.md`, incompatible with Codex, stale without reason, or whose description does not match contents.
+V1 enforces install thresholds and lightweight deduplication. Archived, publisher, updated/stale, compatibility, and description-vs-content checks are manual review items for now.
 
 Recommend at most 3 skills. Deduplicate overlapping skills and keep the broader useful one.

@@ -16,7 +16,8 @@ npm run build
 node dist/src/cli.js <command>
 ```
 
-如果以后把 bin 链接好，可以改成 `skill-gate <command>`。
+如果通过 npm link / 全局安装让 bin 上 PATH，可以改成 `skill-gate <command>`。
+从 npm/Git 安装时 `prepare` 会自动 build；直接克隆时仍建议先手动跑一次 `npm run build`。
 
 ## 标准流程
 
@@ -50,7 +51,7 @@ node dist/src/cli.js recommend "build a React app" --mode explorer
 
 - `trusted`: >= 10000 installs
 - `popular`: >= 1000 installs
-- `explorer`: 不设安装量门槛，只探索
+- `explorer`: 不设安装量门槛；仍然必须 inspect，use/install 仍然要显式批准
 
 如果任务领域没被关键词 gate 识别，但你确定要搜：
 
@@ -203,5 +204,5 @@ node dist/src/cli.js diff <owner/repo@skill>
 - 判断是否需要 Skill 还是关键词 gate，不是真语义边际收益分析。
 - 去重是 token overlap，不是真能力覆盖分析。
 - 推荐质量过滤还没检查 publisher、updated、archived、compatibility。
-- 风险扫描偏保守，可能把说明文字里的网络/API/shell 关键词判成 HIGH。
+- 风险扫描只看 `SKILL.md` 和 `scripts/` 里的危险行为，降低 policy/reference 文字误报；仍然偏保守。
 - 测试是 MVP self-check，不是完整规则矩阵。

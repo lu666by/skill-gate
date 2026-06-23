@@ -10,7 +10,7 @@ import {
   rmSync,
   writeFileSync
 } from "node:fs";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 export type Risk = "LOW" | "MEDIUM" | "HIGH";
 
@@ -151,7 +151,12 @@ export function recommend(task: string, mode: ThresholdMode = "popular", force =
   }
 
   const query = queryForTask(task);
-  const raw = run("npx", ["--yes", "skills", "find", query], process.cwd(), true);
+  let raw: string;
+  try {
+    raw = run("npx", ["--yes", "skills", "find", query], process.cwd());
+  } catch {
+    throw new Error(`search failed: npx skills find ${query}`);
+  }
   const minInstalls = thresholdForMode(mode);
   const candidates = dedupeCandidates(parseSkillsFind(raw).filter((item) => item.installs >= minInstalls)).slice(0, 3);
   if (candidates.length === 0) {
@@ -242,29 +247,33 @@ export function delegateText(task: string): string {
 export function auditSkill(skillDir: string): Audit {
   const files = walkFiles(skillDir);
   const hashes: Record<string, string> = {};
-  const text = files.map((file) => {
+  const texts = files.map((file) => {
     const absolute = join(skillDir, file);
     const bytes = readFileSync(absolute);
     hashes[file] = createHash("sha256").update(bytes).digest("hex");
-    return isTextish(file) ? bytes.toString("utf8") : "";
-  }).join("\n");
+    return { file: file.replaceAll("\\", "/"), text: isTextish(file) ? bytes.toString("utf8") : "" };
+  });
 
   const executableScripts = files.filter((file) => {
     const lower = file.toLowerCase().replaceAll("\\", "/");
     const ext = lower.includes(".") ? lower.slice(lower.lastIndexOf(".")) : "";
     return lower.startsWith("scripts/") && executableExts.has(ext);
   });
+  const skillText = texts.find((item) => item.file === "SKILL.md")?.text || "";
+  const scriptText = texts.filter((item) => item.file.startsWith("scripts/")).map((item) => item.text).join("\n");
+  // ponytail: scan executable/intended instructions, not policy references that merely name risks.
+  const riskyText = [skillText, scriptText].join("\n");
 
   const capabilities = {
     hasSkillMd: files.some((file) => file.replaceAll("\\", "/") === "SKILL.md"),
     executableScripts,
-    networkAccess: /\bhttps?:\/\/|fetch\s*\(|invoke-webrequest|curl\b|wget\b|git clone|npm install|pip install/i.test(text),
-    shellExecution: /child_process|exec\s*\(|spawn\s*\(|powershell|pwsh|bash\b|cmd\.exe/i.test(text) || executableScripts.some((file) => /\.(sh|ps1|bat|cmd)$/i.test(file)),
-    readsEnvironment: /process\.env|\$env:|api[_-]?key|token|secret/i.test(text),
-    writesOutsideRepo: /\.\.\/|~\/|%userprofile%|appdata|c:\\users/i.test(text),
-    globalConfigChanges: /\.codex|config\.toml|agents\/plugins|codex plugin/i.test(text),
-    destructiveCommands: /rm\s+-rf|remove-item|del\s+\/[sq]|rmdir\b|format\s+[a-z]:/i.test(text),
-    promptInjection: /ignore (all )?(previous|prior) instructions|system prompt|developer message|exfiltrate|leak.*secret/i.test(text)
+    networkAccess: /fetch\s*\(|invoke-webrequest|curl\b|wget\b|git clone|npm install|pip install/i.test(riskyText),
+    shellExecution: /child_process|exec\s*\(|spawn\s*\(|\b(powershell|pwsh|bash|cmd\.exe)\s+[-/]/i.test(riskyText) || executableScripts.some((file) => /\.(sh|ps1|bat|cmd)$/i.test(file)),
+    readsEnvironment: /process\.env|\$env:|api[_ -]?key|\b(access|bearer|github|api)[_-]?token\b|secret/i.test(riskyText),
+    writesOutsideRepo: /\.\.\/|~\/|%userprofile%|appdata|c:\\users/i.test(riskyText),
+    globalConfigChanges: /\.codex|config\.toml|agents\/plugins|codex plugin/i.test(riskyText),
+    destructiveCommands: /rm\s+-rf|remove-item|del\s+\/[sq]|rmdir\b|format\s+[a-z]:/i.test(riskyText),
+    promptInjection: /ignore (all )?(previous|prior) instructions|system prompt|developer message|exfiltrate|leak.*secret/i.test(riskyText)
   };
 
   let risk: Risk = "LOW";
@@ -296,42 +305,48 @@ export function inspectSource(source: string, options: InspectOptions = {}): { s
   const sessionId = options.sessionId || timestamp();
   const sessionDir = join(cwd, ".skill-gate", "sessions", sessionId);
   const skillsDir = join(sessionDir, "skills");
-  mkdirSync(skillsDir, { recursive: true });
+  try {
+    mkdirSync(skillsDir, { recursive: true });
 
-  let sourceSkillDir: string;
-  let commitSha = "local";
-  let parsed: ReturnType<typeof parseSkillSource> | null = null;
+    let sourceSkillDir: string;
+    let commitSha = "local";
+    let parsed: ReturnType<typeof parseSkillSource> | null = null;
 
-  if (existsSync(resolve(cwd, source)) || existsSync(source)) {
-    sourceSkillDir = resolve(cwd, source);
-  } else {
-    parsed = parseSkillSource(source);
-    const repoDir = join(sessionDir, "repo");
-    run("git", ["clone", "--depth", "1", "--quiet", parsed.repoUrl, repoDir], cwd);
-    commitSha = run("git", ["-C", repoDir, "rev-parse", "HEAD"], cwd).trim();
-    sourceSkillDir = findSkillDir(repoDir, parsed.skill);
+    if (existsSync(resolve(cwd, source)) || existsSync(source)) {
+      sourceSkillDir = resolve(cwd, source);
+    } else {
+      parsed = parseSkillSource(source);
+      const repoDir = join(sessionDir, "repo");
+      run("git", ["clone", "--depth", "1", "--quiet", parsed.repoUrl, repoDir], cwd);
+      commitSha = run("git", ["-C", repoDir, "rev-parse", "HEAD"], cwd).trim();
+      sourceSkillDir = findSkillDir(repoDir, parsed.skill);
+    }
+
+    const skillName = storageSkillName(readSkillName(join(sourceSkillDir, "SKILL.md")), parsed?.skill, basename(sourceSkillDir));
+    const targetSkillDir = safeChildPath(skillsDir, skillName);
+    cpSync(sourceSkillDir, targetSkillDir, { recursive: true });
+
+    const audit = auditSkill(targetSkillDir);
+    audit.skill = skillName;
+    const manifest: Manifest = {
+      skill: audit.skill,
+      source,
+      installCount: options.installCount ?? null,
+      commitSha,
+      risk: audit.risk,
+      approvedByUser: options.approved === true,
+      scope: "temporary",
+      createdFiles: [toPosix(relative(cwd, sessionDir))]
+    };
+
+    writeJson(join(sessionDir, "audit.json"), audit);
+    writeJson(join(sessionDir, "manifest.json"), manifest);
+
+    return { sessionDir, audit, manifest };
+  } catch (error) {
+    if (existsSync(sessionDir)) rmSync(sessionDir, { recursive: true, force: true });
+    throw error;
   }
-
-  const skillName = readSkillName(join(sourceSkillDir, "SKILL.md")) || parsed?.skill || basename(sourceSkillDir);
-  const targetSkillDir = join(skillsDir, skillName);
-  cpSync(sourceSkillDir, targetSkillDir, { recursive: true });
-
-  const audit = auditSkill(targetSkillDir);
-  const manifest: Manifest = {
-    skill: audit.skill,
-    source,
-    installCount: options.installCount ?? null,
-    commitSha,
-    risk: audit.risk,
-    approvedByUser: options.approved === true,
-    scope: "temporary",
-    createdFiles: [toPosix(relative(cwd, sessionDir))]
-  };
-
-  writeJson(join(sessionDir, "audit.json"), audit);
-  writeJson(join(sessionDir, "manifest.json"), manifest);
-
-  return { sessionDir, audit, manifest };
 }
 
 export function inspectText(source: string, options: InspectOptions = {}): string {
@@ -359,10 +374,12 @@ export function inspectText(source: string, options: InspectOptions = {}): strin
 
 export function useText(source: string, approved: boolean, cwd = process.cwd()): string {
   if (!approved) {
-    return "Refusing to use this skill without approval. Rerun with --approve after the user confirms.";
+    throw new Error("Refusing to use this skill without approval. Rerun with --approve after the user confirms.");
   }
-  const inspected = approveInspectedSession(source, cwd);
-  if (!inspected) return `No inspected session for ${source}. Run inspect first, then approve use.`;
+  const inspected = latestInspectedSession(source, cwd);
+  if (!inspected) throw new Error(`No inspected session for ${source}. Run inspect first, then approve use.`);
+  if (inspected.manifest.risk === "HIGH") throw new Error("HIGH risk skills are view-only in v1. Use view to inspect files; scripts are not loaded or installed.");
+  approveManifest(inspected);
   const { manifest, path } = inspected;
   const sessionDir = dirname(path);
   return [
@@ -387,13 +404,16 @@ export function viewText(source: string): string {
 
 export function installText(source: string, approved: boolean, cwd = process.cwd()): string {
   if (!approved) {
-    return "Refusing to install this skill without approval. Rerun with --approve after the user confirms.";
+    throw new Error("Refusing to install this skill without approval. Rerun with --approve after the user confirms.");
   }
-  const inspected = approveInspectedSession(source, cwd);
-  if (!inspected) return `No inspected session for ${source}. Run inspect first, then approve install.`;
+  const inspected = latestInspectedSession(source, cwd);
+  if (!inspected) throw new Error(`No inspected session for ${source}. Run inspect first, then approve install.`);
+  if (inspected.manifest.risk === "HIGH") throw new Error("HIGH risk skills are view-only in v1. Use view to inspect files; project install is refused.");
+  approveManifest(inspected);
   const { manifest, path } = inspected;
-  const sourceDir = join(dirname(path), "skills", manifest.skill);
-  const targetDir = join(resolve(cwd), ".skill-gate", "project-skills", manifest.skill);
+  const skillName = validateSkillName(manifest.skill);
+  const sourceDir = safeChildPath(join(dirname(path), "skills"), skillName);
+  const targetDir = safeChildPath(join(resolve(cwd), ".skill-gate", "project-skills"), skillName);
   if (existsSync(targetDir)) rmSync(targetDir, { recursive: true, force: true });
   cpSync(sourceDir, targetDir, { recursive: true });
   return [
@@ -414,8 +434,9 @@ export function packText(packName = `pack-${timestamp()}`, cwd = process.cwd()):
   const packDir = join(resolve(cwd), ".skill-gate", "packs", safeName);
   mkdirSync(join(packDir, "skills"), { recursive: true });
   for (const { manifest, path } of manifests) {
-    const skillDir = join(dirname(path), "skills", manifest.skill);
-    if (existsSync(skillDir)) cpSync(skillDir, join(packDir, "skills", manifest.skill), { recursive: true });
+    const skillName = validateSkillName(manifest.skill);
+    const skillDir = safeChildPath(join(dirname(path), "skills"), skillName);
+    if (existsSync(skillDir)) cpSync(skillDir, safeChildPath(join(packDir, "skills"), skillName), { recursive: true });
   }
   writeJson(join(packDir, "manifest.json"), {
     name: safeName,
@@ -445,7 +466,7 @@ export function statusText(cwd = process.cwd()): string {
 }
 
 export function cleanupSessions(cwd = process.cwd(), approved = false): string {
-  if (!approved) return "Cleanup requires user approval. Ask whether to delete temporary Skill Gate sessions, then rerun cleanup --approve.";
+  if (!approved) throw new Error("Cleanup requires user approval. Ask whether to delete temporary Skill Gate sessions, then rerun cleanup --approve.");
   const manifests = readManifests(cwd);
   if (manifests.length === 0) return "No temporary Skill Gate sessions to clean.";
   const root = join(resolve(cwd), ".skill-gate");
@@ -462,7 +483,7 @@ export function cleanupSessions(cwd = process.cwd(), approved = false): string {
 export function safeRemove(root: string, target: string): void {
   const safeRoot = resolve(root);
   const safeTarget = resolve(target);
-  if (safeTarget !== safeRoot && !safeTarget.startsWith(safeRoot + "\\" ) && !safeTarget.startsWith(safeRoot + "/")) {
+  if (safeTarget === safeRoot || (!safeTarget.startsWith(safeRoot + "\\" ) && !safeTarget.startsWith(safeRoot + "/"))) {
     throw new Error(`Refusing to remove outside .skill-gate: ${safeTarget}`);
   }
   if (existsSync(safeTarget)) rmSync(safeTarget, { recursive: true, force: true });
@@ -533,6 +554,7 @@ function main(): void {
       return;
     }
     console.log(helpText());
+    process.exitCode = 1;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`skill-gate: ${message}`);
@@ -582,7 +604,7 @@ function parseMode(args: string[]): ThresholdMode {
 }
 
 function findSkillDir(repoDir: string, skill: string): string {
-  const aliases = [skill, stripKnownPrefix(skill)];
+  const aliases = skillAliases(skill);
   const direct = [
     ...aliases.map((name) => join(repoDir, name, "SKILL.md")),
     ...aliases.map((name) => join(repoDir, "skills", name, "SKILL.md"))
@@ -598,6 +620,19 @@ function findSkillDir(repoDir: string, skill: string): string {
 
 function stripKnownPrefix(skill: string): string {
   return skill.replace(/^(vercel|anthropic|openai|google|meta|microsoft)-/, "");
+}
+
+function skillAliases(skill: string): string[] {
+  const colonAsDash = skill.replace(/:/g, "-");
+  const colonAsSlash = skill.replace(/:/g, "/");
+  return [...new Set([
+    skill,
+    stripKnownPrefix(skill),
+    colonAsDash,
+    stripKnownPrefix(colonAsDash),
+    colonAsSlash,
+    stripKnownPrefix(colonAsSlash)
+  ])];
 }
 
 function readSkillName(skillFile: string): string | null {
@@ -616,15 +651,19 @@ function readManifests(cwd: string): Array<{ manifest: Manifest; path: string }>
     .map((file) => ({ manifest: JSON.parse(readFileSync(file, "utf8")) as Manifest, path: file }));
 }
 
-function approveInspectedSession(source: string, cwd = process.cwd()): { manifest: Manifest; path: string } | null {
+function latestInspectedSession(source: string, cwd = process.cwd()): { manifest: Manifest; path: string } | null {
   const match = readManifests(cwd)
     .filter((item) => item.manifest.source === source)
     .sort((a, b) => b.path.localeCompare(a.path))[0];
   if (!match) return null;
+  validateSkillName(match.manifest.skill);
+  return match;
+}
+
+function approveManifest(match: { manifest: Manifest; path: string }): void {
   match.manifest.approvedByUser = true;
   match.manifest.approvedAt = new Date().toISOString();
   writeJson(match.path, match.manifest);
-  return match;
 }
 
 function run(command: string, args: string[], cwd: string, allowFailure = false): string {
@@ -640,6 +679,30 @@ function run(command: string, args: string[], cwd: string, allowFailure = false)
     if (allowFailure) return "";
     throw error;
   }
+}
+
+function validateSkillName(name: string): string {
+  if (!/^[A-Za-z0-9._-]+$/.test(name) || name === "." || name === "..") {
+    throw new Error(`Invalid skill name: ${name}`);
+  }
+  return name;
+}
+
+function safeChildPath(parent: string, childName: string): string {
+  const target = resolve(parent, validateSkillName(childName));
+  const rel = relative(resolve(parent), target);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) {
+    throw new Error(`Refusing path outside target directory: ${target}`);
+  }
+  return target;
+}
+
+function storageSkillName(declared: string | null, sourceSkill: string | undefined, fallback: string): string {
+  if (declared && /^[A-Za-z0-9._-]+$/.test(declared) && declared !== "." && declared !== "..") return declared;
+  if (declared && sourceSkill && declared === sourceSkill && declared.includes(":")) return validateSkillName(declared.replace(/:/g, "-"));
+  if (declared) throw new Error(`Invalid skill name: ${declared}`);
+  if (sourceSkill && sourceSkill.includes(":")) return validateSkillName(sourceSkill.replace(/:/g, "-"));
+  return validateSkillName(sourceSkill || fallback);
 }
 
 function walkFiles(root: string): string[] {

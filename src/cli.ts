@@ -4,9 +4,13 @@ import { createHash } from "node:crypto";
 import {
   cpSync,
   existsSync,
+  closeSync,
+  lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   rmSync,
   writeFileSync
 } from "node:fs";
@@ -36,6 +40,12 @@ export type Audit = {
     globalConfigChanges: boolean;
     destructiveCommands: boolean;
     promptInjection: boolean;
+    symlinks: string[];
+    hiddenFiles: string[];
+    largeFiles: string[];
+    largeCriticalFiles: string[];
+    binaryFiles: string[];
+    installHooks: boolean;
   };
   risk: Risk;
 };
@@ -59,8 +69,18 @@ type InspectOptions = {
   installCount?: number | null;
 };
 
+type ParsedSource = {
+  owner: string;
+  repo: string;
+  repoUrl: string;
+  skill?: string;
+  ref?: string;
+  path?: string;
+};
+
 const ansiPattern = /\u001b\[[0-9;]*m/g;
 const executableExts = new Set([".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd", ".js", ".mjs", ".cjs", ".ts", ".py"]);
+const maxAuditFileBytes = 1_000_000;
 
 export function stripAnsi(value: string): string {
   return value.replace(ansiPattern, "");
@@ -176,8 +196,8 @@ export function recommend(task: string, mode: ThresholdMode = "popular", force =
     ...candidates.map((item, index) => [
       `${index + 1}. ${item.source}`,
       `   Installs: ${item.installs.toLocaleString()}`,
-      item.url ? `   Source: ${item.url}` : undefined,
-      "   Next: inspect before use"
+      item.url ? `   Catalog: ${item.url}` : undefined,
+      `   Next: skill-gate inspect ${item.source}`
     ].filter(Boolean).join("\n"))
   ].join("\n");
 }
@@ -245,22 +265,32 @@ export function delegateText(task: string): string {
 }
 
 export function auditSkill(skillDir: string): Audit {
-  const files = walkFiles(skillDir);
+  const { files, symlinks } = walkFileEntries(skillDir);
   const hashes: Record<string, string> = {};
   const texts = files.map((file) => {
     const absolute = join(skillDir, file);
-    const bytes = readFileSync(absolute);
-    hashes[file] = createHash("sha256").update(bytes).digest("hex");
-    return { file: file.replaceAll("\\", "/"), text: isTextish(file) ? bytes.toString("utf8") : "" };
+    const stat = lstatSync(absolute);
+    const bytes = stat.size <= maxAuditFileBytes ? readFileSync(absolute) : Buffer.from("");
+    hashes[file] = hashFile(absolute);
+    return { file: file.replaceAll("\\", "/"), bytes, size: stat.size, text: isTextish(file) && stat.size <= maxAuditFileBytes ? bytes.toString("utf8") : "" };
   });
 
-  const executableScripts = files.filter((file) => {
+  const isScriptFile = (file: string): boolean => {
     const lower = file.toLowerCase().replaceAll("\\", "/");
     const ext = lower.includes(".") ? lower.slice(lower.lastIndexOf(".")) : "";
-    return lower.startsWith("scripts/") && executableExts.has(ext);
+    return (lower.startsWith("scripts/") || lower.includes("/scripts/")) && executableExts.has(ext);
+  };
+  const executableScripts = files.filter(isScriptFile);
+  const hiddenFiles = files.filter((file) => file.split(/[\\/]/).some((part) => part.startsWith(".") && part.length > 1));
+  const largeFiles = files.filter((file) => lstatSync(join(skillDir, file)).size > maxAuditFileBytes);
+  const largeCriticalFiles = largeFiles.filter((file) => {
+    const posix = file.replaceAll("\\", "/");
+    return posix === "SKILL.md" || posix.endsWith("/package.json") || posix === "package.json" || isScriptFile(posix);
   });
+  const binaryFiles = texts.filter((item) => !isTextish(item.file) || looksBinary(item.bytes)).map((item) => item.file);
+  const packageTexts = texts.filter((item) => item.file === "package.json" || item.file.endsWith("/package.json")).map((item) => item.text).join("\n");
   const skillText = texts.find((item) => item.file === "SKILL.md")?.text || "";
-  const scriptText = texts.filter((item) => item.file.startsWith("scripts/")).map((item) => item.text).join("\n");
+  const scriptText = texts.filter((item) => isScriptFile(item.file)).map((item) => item.text).join("\n");
   // ponytail: scan executable/intended instructions, not policy references that merely name risks.
   const riskyText = [skillText, scriptText].join("\n");
 
@@ -273,7 +303,13 @@ export function auditSkill(skillDir: string): Audit {
     writesOutsideRepo: /\.\.\/|~\/|%userprofile%|appdata|c:\\users/i.test(riskyText),
     globalConfigChanges: /\.codex|config\.toml|agents\/plugins|codex plugin/i.test(riskyText),
     destructiveCommands: /rm\s+-rf|remove-item|del\s+\/[sq]|rmdir\b|format\s+[a-z]:/i.test(riskyText),
-    promptInjection: /ignore (all )?(previous|prior) instructions|system prompt|developer message|exfiltrate|leak.*secret/i.test(riskyText)
+    promptInjection: /ignore (all )?(previous|prior) instructions|system prompt|developer message|exfiltrate|leak.*secret/i.test(riskyText),
+    symlinks,
+    hiddenFiles,
+    largeFiles,
+    largeCriticalFiles,
+    binaryFiles,
+    installHooks: /"(preinstall|install|postinstall|prepare)"\s*:/i.test(packageTexts)
   };
 
   let risk: Risk = "LOW";
@@ -284,10 +320,13 @@ export function auditSkill(skillDir: string): Audit {
     capabilities.writesOutsideRepo ||
     capabilities.globalConfigChanges ||
     capabilities.destructiveCommands ||
-    capabilities.promptInjection
+    capabilities.promptInjection ||
+    capabilities.symlinks.length > 0 ||
+    capabilities.largeCriticalFiles.length > 0 ||
+    capabilities.installHooks
   ) {
     risk = "HIGH";
-  } else if (capabilities.networkAccess) {
+  } else if (capabilities.networkAccess || capabilities.hiddenFiles.length > 0 || capabilities.largeFiles.length > 0 || capabilities.binaryFiles.length > 0) {
     risk = "MEDIUM";
   }
 
@@ -310,16 +349,21 @@ export function inspectSource(source: string, options: InspectOptions = {}): { s
 
     let sourceSkillDir: string;
     let commitSha = "local";
-    let parsed: ReturnType<typeof parseSkillSource> | null = null;
+    let parsed: ParsedSource | null = null;
 
     if (existsSync(resolve(cwd, source)) || existsSync(source)) {
       sourceSkillDir = resolve(cwd, source);
     } else {
       parsed = parseSkillSource(source);
       const repoDir = join(sessionDir, "repo");
-      run("git", ["clone", "--depth", "1", "--quiet", parsed.repoUrl, repoDir], cwd);
+      if (parsed.ref) {
+        run("git", ["clone", "--quiet", parsed.repoUrl, repoDir], cwd);
+        run("git", ["-C", repoDir, "checkout", "--quiet", parsed.ref], cwd);
+      } else {
+        run("git", ["clone", "--depth", "1", "--quiet", parsed.repoUrl, repoDir], cwd);
+      }
       commitSha = run("git", ["-C", repoDir, "rev-parse", "HEAD"], cwd).trim();
-      sourceSkillDir = findSkillDir(repoDir, parsed.skill);
+      sourceSkillDir = parsed.path ? skillDirAtPath(repoDir, parsed.path) : findSkillDir(repoDir, parsed.skill);
     }
 
     const skillName = storageSkillName(readSkillName(join(sourceSkillDir, "SKILL.md")), parsed?.skill, basename(sourceSkillDir));
@@ -367,6 +411,12 @@ export function inspectText(source: string, options: InspectOptions = {}): strin
     `Writes outside repo:  ${yesNo(audit.capabilities.writesOutsideRepo)}`,
     `Global config changes: ${yesNo(audit.capabilities.globalConfigChanges)}`,
     `Executable scripts:   ${audit.capabilities.executableScripts.length ? audit.capabilities.executableScripts.join(", ") : "No"}`,
+    `Install hooks:        ${yesNo(audit.capabilities.installHooks)}`,
+    `Symlinks:             ${audit.capabilities.symlinks.length ? audit.capabilities.symlinks.join(", ") : "No"}`,
+    `Hidden files:         ${audit.capabilities.hiddenFiles.length ? audit.capabilities.hiddenFiles.join(", ") : "No"}`,
+    `Large files:          ${audit.capabilities.largeFiles.length ? audit.capabilities.largeFiles.join(", ") : "No"}`,
+    `Large critical files: ${audit.capabilities.largeCriticalFiles.length ? audit.capabilities.largeCriticalFiles.join(", ") : "No"}`,
+    `Binary files:         ${audit.capabilities.binaryFiles.length ? audit.capabilities.binaryFiles.join(", ") : "No"}`,
     "",
     `Risk: ${audit.risk}`
   ].join("\n");
@@ -434,6 +484,7 @@ export function packText(packName = `pack-${timestamp()}`, cwd = process.cwd()):
   const packDir = join(resolve(cwd), ".skill-gate", "packs", safeName);
   mkdirSync(join(packDir, "skills"), { recursive: true });
   for (const { manifest, path } of manifests) {
+    if (manifest.risk === "HIGH") throw new Error(`Refusing to pack HIGH risk skill: ${manifest.skill}`);
     const skillName = validateSkillName(manifest.skill);
     const skillDir = safeChildPath(join(dirname(path), "skills"), skillName);
     if (existsSync(skillDir)) cpSync(skillDir, safeChildPath(join(packDir, "skills"), skillName), { recursive: true });
@@ -567,7 +618,7 @@ function helpText(): string {
     "Usage:",
     "  skill-gate recommend \"<task>\" [--mode trusted|popular|explorer] [--force]",
     "  skill-gate delegate \"<task>\"",
-    "  skill-gate inspect <owner/repo@skill|local-path>",
+    "  skill-gate inspect <owner/repo@skill|github-url|local-path>",
     "  skill-gate use <source> --approve",
     "  skill-gate view <source>",
     "  skill-gate install <source> --approve",
@@ -579,9 +630,28 @@ function helpText(): string {
   ].join("\n");
 }
 
-function parseSkillSource(source: string): { owner: string; repo: string; repoUrl: string; skill: string } {
+export function parseSkillSource(source: string): ParsedSource {
+  if (source.startsWith("https://skills.sh/")) {
+    const url = new URL(source);
+    const parts = url.pathname.split("/").filter(Boolean);
+    if (parts.length < 3) throw new Error(`Expected skills.sh URL like https://skills.sh/owner/repo/skill, got: ${source}`);
+    const [owner, repo, ...skillParts] = parts;
+    const skill = skillParts.join("/");
+    return { owner, repo, repoUrl: `https://github.com/${owner}/${repo}.git`, skill };
+  }
+  if (source.startsWith("https://github.com/")) {
+    const url = new URL(source);
+    const parts = url.pathname.split("/").filter(Boolean);
+    if (parts.length < 2) throw new Error(`Expected GitHub URL like https://github.com/owner/repo, got: ${source}`);
+    const owner = parts[0];
+    const repo = parts[1].replace(/\.git$/, "");
+    const treeIndex = parts.indexOf("tree");
+    const ref = treeIndex >= 0 ? parts[treeIndex + 1] : undefined;
+    const path = treeIndex >= 0 ? parts.slice(treeIndex + 2).join("/") : undefined;
+    return { owner, repo, repoUrl: `https://github.com/${owner}/${repo}.git`, ref, path, skill: path ? basename(path) : undefined };
+  }
   const match = source.match(/^([^/@]+)\/([^/@]+)@(.+)$/);
-  if (!match) throw new Error(`Expected source like owner/repo@skill, got: ${source}`);
+  if (!match) throw new Error(`Expected source like owner/repo@skill or https://github.com/owner/repo/tree/ref/path, got: ${source}`);
   return {
     owner: match[1],
     repo: match[2],
@@ -603,7 +673,13 @@ function parseMode(args: string[]): ThresholdMode {
   return "popular";
 }
 
-function findSkillDir(repoDir: string, skill: string): string {
+function findSkillDir(repoDir: string, skill?: string): string {
+  if (!skill) {
+    if (existsSync(join(repoDir, "SKILL.md"))) return repoDir;
+    const matches = walkDirs(repoDir).filter((dir) => existsSync(join(dir, "SKILL.md")));
+    if (matches.length === 1) return matches[0];
+    throw new Error(`Could not choose a skill automatically; found ${matches.length} SKILL.md files. Use a GitHub /tree/<ref>/<path> URL.`);
+  }
   const aliases = skillAliases(skill);
   const direct = [
     ...aliases.map((name) => join(repoDir, name, "SKILL.md")),
@@ -614,8 +690,19 @@ function findSkillDir(repoDir: string, skill: string): string {
   }
   const matches = walkDirs(repoDir).filter((dir) => aliases.includes(basename(dir)) && existsSync(join(dir, "SKILL.md")));
   if (matches[0]) return matches[0];
+  const frontmatterMatches = walkDirs(repoDir).filter((dir) => existsSync(join(dir, "SKILL.md")) && aliases.includes((readSkillName(join(dir, "SKILL.md")) || "").replace(/:/g, "-")));
+  if (frontmatterMatches.length === 1) return frontmatterMatches[0];
+  if (frontmatterMatches.length > 1) throw new Error(`Multiple SKILL.md files declare ${skill}; use a GitHub /tree/<ref>/<path> URL.`);
   if (existsSync(join(repoDir, "SKILL.md"))) return repoDir;
   throw new Error(`Could not find SKILL.md for ${skill}`);
+}
+
+function skillDirAtPath(repoDir: string, path: string): string {
+  const target = resolve(repoDir, path);
+  const rel = relative(resolve(repoDir), target);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) throw new Error(`Refusing skill path outside repo: ${path}`);
+  if (!existsSync(join(target, "SKILL.md"))) throw new Error(`Could not find SKILL.md at ${path}`);
+  return target;
 }
 
 function stripKnownPrefix(skill: string): string {
@@ -637,7 +724,10 @@ function skillAliases(skill: string): string[] {
 
 function readSkillName(skillFile: string): string | null {
   if (!existsSync(skillFile)) return null;
-  const match = readFileSync(skillFile, "utf8").match(/^name:\s*["']?([^"'\r\n]+)["']?/m);
+  const text = readFileSync(skillFile, "utf8");
+  const frontmatter = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  const header = frontmatter?.[1] || "";
+  const match = header.match(/^name:\s*["']?([^"'\r\n]+)["']?/m);
   return match ? match[1].trim() : null;
 }
 
@@ -700,22 +790,62 @@ function safeChildPath(parent: string, childName: string): string {
 function storageSkillName(declared: string | null, sourceSkill: string | undefined, fallback: string): string {
   if (declared && /^[A-Za-z0-9._-]+$/.test(declared) && declared !== "." && declared !== "..") return declared;
   if (declared && sourceSkill && declared === sourceSkill && declared.includes(":")) return validateSkillName(declared.replace(/:/g, "-"));
+  if (declared && sourceSkill && declared.replace(/:/g, "-") === sourceSkill) return validateSkillName(sourceSkill);
   if (declared) throw new Error(`Invalid skill name: ${declared}`);
   if (sourceSkill && sourceSkill.includes(":")) return validateSkillName(sourceSkill.replace(/:/g, "-"));
   return validateSkillName(sourceSkill || fallback);
 }
 
+function hashFile(file: string): string {
+  const hash = createHash("sha256");
+  const fd = openSync(file, "r");
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  try {
+    let bytesRead = 0;
+    do {
+      bytesRead = readSync(fd, buffer, 0, buffer.length, null);
+      if (bytesRead > 0) hash.update(buffer.subarray(0, bytesRead));
+    } while (bytesRead > 0);
+  } finally {
+    closeSync(fd);
+  }
+  return hash.digest("hex");
+}
+
+function looksBinary(bytes: Buffer): boolean {
+  if (bytes.length === 0) return false;
+  const sample = bytes.subarray(0, Math.min(bytes.length, 4096));
+  let suspicious = 0;
+  for (const byte of sample) {
+    if (byte === 0) return true;
+    if (byte < 7 || (byte > 14 && byte < 32)) suspicious += 1;
+  }
+  return suspicious / sample.length > 0.3;
+}
+
 function walkFiles(root: string): string[] {
-  const out: string[] = [];
+  return walkFileEntries(root).files;
+}
+
+function walkFileEntries(root: string): { files: string[]; symlinks: string[] } {
+  const files: string[] = [];
+  const symlinks: string[] = [];
+  walkFileEntriesInto(root, "", files, symlinks);
+  return { files: files.sort(), symlinks: symlinks.sort() };
+}
+
+function walkFileEntriesInto(root: string, prefix: string, files: string[], symlinks: string[]): void {
   for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const relativePath = toPosix(prefix ? join(prefix, entry.name) : entry.name);
     const absolute = join(root, entry.name);
-    if (entry.isDirectory()) {
-      for (const child of walkFiles(absolute)) out.push(toPosix(join(entry.name, child)));
+    if (entry.isSymbolicLink()) {
+      symlinks.push(relativePath);
+    } else if (entry.isDirectory()) {
+      walkFileEntriesInto(absolute, relativePath, files, symlinks);
     } else if (entry.isFile()) {
-      out.push(toPosix(entry.name));
+      files.push(relativePath);
     }
   }
-  return out.sort();
 }
 
 function walkDirs(root: string): string[] {

@@ -13,7 +13,7 @@ MEDIUM:
 
 HIGH:
 
-- Executable scripts.
+- Executable scripts, nested `scripts/`, package install hooks, or symlinks.
 - Shell, PowerShell, or external downloads.
 - Environment variables, API keys, secrets, or global Codex config.
 - Writes outside the project, administrator privileges, delete commands, or prompt-injection language.

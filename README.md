@@ -105,13 +105,15 @@ Local checkout examples use `node dist/src/cli.js <command>`. If the package bin
 | `cleanup --approve` | Delete only manifest-owned paths inside `.skill-gate`. |
 | `diff <source>` | Compare the pinned commit with current remote HEAD. |
 
+Sources can be local paths, `owner/repo@skill`, GitHub repo URLs, or GitHub tree URLs such as `https://github.com/org/repo/tree/main/path/to/skill`.
+
 ## Risk
 
 | Risk | Meaning | V1 behavior |
 |---|---|---|
 | LOW | Static `SKILL.md` and references. No scripts, secrets, or outside writes. | Can be used once after approval. |
 | MEDIUM | Network instructions or templates, but no automatic execution. | Show the summary first. |
-| HIGH | Scripts, shell, env/secrets, global config, deletes, outside writes, or prompt injection. | View-only. No script execution. |
+| HIGH | Scripts, install hooks, symlinks, shell, env/secrets, global config, deletes, outside writes, or prompt injection. | View-only. No script execution. |
 
 ## What It Is Not
 

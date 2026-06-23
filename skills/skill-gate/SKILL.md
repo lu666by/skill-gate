@@ -34,7 +34,7 @@ If the npm bin is on PATH, `skill-gate <command>` is equivalent.
    - If more than one candidate is plausible, ask the user to choose before inspecting or using one.
 
 3. Inspect before use.
-   - Run `node dist/src/cli.js inspect <owner/repo@skill>`.
+   - Run `node dist/src/cli.js inspect <owner/repo@skill>` or a GitHub tree URL when the skill lives in a subdirectory.
    - This downloads or copies the candidate into an isolated `.skill-gate/sessions/<id>/` directory so it can be audited.
    - Summarize source, install count if known, pinned commit, files, capabilities, and risk.
    - Read `references/risk-policy.md` if risk interpretation matters.
@@ -105,7 +105,7 @@ Read `references/trust-policy.md` before changing recommendation thresholds, sou
 
 - `node dist/src/cli.js recommend "<task>"`: analyze the task and recommend 0 to 3 skills.
 - `node dist/src/cli.js delegate "<task>"`: create a plan-only multi-agent work split with reviewer checklist.
-- `node dist/src/cli.js inspect <source>`: clone or read a skill into an isolated session and write `audit.json`.
+- `node dist/src/cli.js inspect <source>`: clone or read a skill into an isolated session and write `audit.json`; source may be local path, `owner/repo@skill`, GitHub repo URL, or GitHub tree URL.
 - `node dist/src/cli.js use <source> --approve`: approve and read the latest inspected pinned session for that source.
 - `node dist/src/cli.js view <source>`: inspect and show the temporary file path without approval.
 - `node dist/src/cli.js install <source> --approve`: copy the latest inspected pinned session into `.skill-gate/project-skills/`.

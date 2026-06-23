@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -66,6 +67,50 @@ assert.throws(() => inspectSource(badSkill, { cwd: temp, sessionId: "bad" }), /I
 assert.equal(existsSync(join(temp, ".skill-gate", "sessions", "escape")), false);
 writeFileSync(join(badSkill, "SKILL.md"), "---\nname: ..\\escape\ndescription: bad\n---\n");
 assert.throws(() => inspectSource(badSkill, { cwd: temp, sessionId: "bad-win" }), /Invalid skill name/);
+writeFileSync(join(badSkill, "SKILL.md"), "---\nname: safe-name\ndescription: ok\n---\n\nname: ../../body-is-not-frontmatter\n");
+assert.equal(inspectSource(badSkill, { cwd: temp, sessionId: "body-name" }).manifest.skill, "safe-name");
+cleanupSessions(temp, true);
+
+const auditEdge = join(temp, "audit-edge");
+mkdirSync(join(auditEdge, "deep", "scripts"), { recursive: true });
+writeFileSync(join(auditEdge, "SKILL.md"), "---\nname: audit-edge\ndescription: edge\n---\n");
+writeFileSync(join(auditEdge, ".hidden"), "x");
+writeFileSync(join(auditEdge, "image.bin"), Buffer.from([0, 1, 2, 3]));
+writeFileSync(join(auditEdge, "payload.md"), Buffer.from([65, 0, 66]));
+writeFileSync(join(auditEdge, "large.txt"), Buffer.alloc(1_000_001, "a"));
+writeFileSync(join(auditEdge, "deep", "scripts", "run.sh"), "curl https://example.com");
+writeFileSync(join(auditEdge, "deep", "scripts", "run.js"), "console.log(process.env.SECRET)");
+writeFileSync(join(auditEdge, "package.json"), JSON.stringify({ scripts: { postinstall: "node setup.js" } }));
+const edgeAudit = auditSkill(auditEdge);
+assert.equal(edgeAudit.capabilities.executableScripts.includes("deep/scripts/run.sh"), true);
+assert.equal(edgeAudit.capabilities.networkAccess, true);
+assert.equal(edgeAudit.capabilities.readsEnvironment, true);
+assert.equal(edgeAudit.capabilities.hiddenFiles.includes(".hidden"), true);
+assert.equal(edgeAudit.capabilities.binaryFiles.includes("image.bin"), true);
+assert.equal(edgeAudit.capabilities.binaryFiles.includes("payload.md"), true);
+assert.equal(edgeAudit.capabilities.largeFiles.includes("large.txt"), true);
+assert.equal(edgeAudit.capabilities.installHooks, true);
+assert.equal(edgeAudit.risk, "HIGH");
+
+const largeCore = join(temp, "large-core");
+mkdirSync(largeCore, { recursive: true });
+writeFileSync(join(largeCore, "SKILL.md"), Buffer.alloc(1_000_001, "x"));
+const largeCoreAudit = auditSkill(largeCore);
+assert.equal(largeCoreAudit.capabilities.largeCriticalFiles.includes("SKILL.md"), true);
+assert.notEqual(largeCoreAudit.hashes["SKILL.md"], createHash("sha256").digest("hex"));
+assert.equal(largeCoreAudit.risk, "HIGH");
+
+const symlinkSkill = join(temp, "symlink-skill");
+mkdirSync(symlinkSkill, { recursive: true });
+writeFileSync(join(symlinkSkill, "SKILL.md"), "---\nname: symlink-skill\ndescription: symlink\n---\n");
+try {
+  symlinkSync(join(symlinkSkill, "SKILL.md"), join(symlinkSkill, "link.md"));
+  const symlinkAudit = auditSkill(symlinkSkill);
+  assert.equal(symlinkAudit.capabilities.symlinks.includes("link.md"), true);
+  assert.equal(symlinkAudit.risk, "HIGH");
+} catch {
+  // Windows may require Developer Mode or elevated privileges for symlink creation.
+}
 
 const session = join(temp, ".skill-gate", "sessions", "test");
 mkdirSync(join(session, "skills", "demo"), { recursive: true });
@@ -99,6 +144,7 @@ writeFileSync(join(session, "manifest.json"), JSON.stringify({
 }));
 assert.throws(() => useText("local", true, temp), /HIGH risk/);
 assert.throws(() => installText("local", true, temp), /HIGH risk/);
+assert.throws(() => packText("bad-pack", temp), /HIGH risk/);
 writeFileSync(join(session, "manifest.json"), JSON.stringify({
   skill: "../../escape",
   source: "local",

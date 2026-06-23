@@ -6,17 +6,24 @@ import { join, resolve } from "node:path";
 import {
   auditSkill,
   cleanupSessions,
+  candidateCatalogMatchesSource,
   dedupeCandidates,
   delegateText,
+  evaluateCandidateQuality,
+  findSkillDir,
   installText,
   inspectText,
   inspectSource,
+  applyText,
   packText,
   parseSkillSource,
   parseSkillsFind,
+  recommend,
+  resolveCandidateInRepo,
   safeRemove,
   taskNeedsSkill,
   thresholdForMode,
+  upgradeText,
   useText
 } from "../src/cli";
 
@@ -66,8 +73,35 @@ assert.deepEqual(dedupeCandidates([
 const commit = "0123456789abcdef0123456789abcdef01234567";
 assert.equal(parseSkillSource(`owner/repo@skill#${commit}`).skill, "skill");
 assert.equal(parseSkillSource(`owner/repo@skill#${commit}`).ref, commit);
+assert.equal(parseSkillSource("owner/repo@react:components").skill, "react:components");
 assert.throws(() => parseSkillSource("owner/repo@skill#main"), /40-hex/);
 assert.throws(() => parseSkillSource("owner/repo@skill#"), /Empty/);
+assert.throws(() => parseSkillSource("owner/repo@../x"), /Invalid skill selector/);
+assert.throws(() => parseSkillSource("owner/repo@..\\x"), /Invalid skill selector/);
+assert.throws(() => parseSkillSource("owner/repo@/x"), /Invalid skill selector/);
+
+const goodFacts = {
+  owner: "owner",
+  repo: "repo",
+  archived: false,
+  license: "MIT",
+  updatedAt: "2026-06-01T00:00:00Z"
+};
+const goodCandidate = {
+  source: "owner/repo@skill",
+  installs: 1000,
+  url: "https://skills.sh/owner/repo/skill"
+};
+assert.equal(candidateCatalogMatchesSource(goodCandidate).accepted, true);
+assert.equal(candidateCatalogMatchesSource({ source: "owner/repo@skill", installs: 1000 }).accepted, false);
+assert.equal(evaluateCandidateQuality(goodCandidate, goodFacts, { ok: true, skill: "skill" }, new Date("2026-06-24T00:00:00Z")).accepted, true);
+assert.equal(evaluateCandidateQuality(goodCandidate, { ...goodFacts, archived: true }, { ok: true }, new Date("2026-06-24T00:00:00Z")).accepted, false);
+assert.equal(evaluateCandidateQuality(goodCandidate, { ...goodFacts, license: null }, { ok: true }, new Date("2026-06-24T00:00:00Z")).accepted, false);
+assert.equal(evaluateCandidateQuality(goodCandidate, { ...goodFacts, license: "NOASSERTION" }, { ok: true }, new Date("2026-06-24T00:00:00Z")).accepted, false);
+assert.equal(evaluateCandidateQuality(goodCandidate, { ...goodFacts, updatedAt: "not-a-date" }, { ok: true }, new Date("2026-06-24T00:00:00Z")).accepted, false);
+assert.equal(evaluateCandidateQuality(goodCandidate, { ...goodFacts, updatedAt: "2024-01-01T00:00:00Z" }, { ok: true }, new Date("2026-06-24T00:00:00Z")).accepted, false);
+assert.equal(evaluateCandidateQuality(goodCandidate, goodFacts, { ok: false, error: "missing SKILL.md" }, new Date("2026-06-24T00:00:00Z")).accepted, false);
+assert.equal(candidateCatalogMatchesSource({ ...goodCandidate, url: "https://skills.sh/other/repo/skill" }).accepted, false);
 
 const fixtureRoot = join(process.cwd(), "fixtures");
 assert.equal(auditSkill(join(fixtureRoot, "safe-skill")).risk, "LOW");
@@ -76,6 +110,18 @@ assert.equal(auditSkill(join(fixtureRoot, "malicious-skill")).capabilities.promp
 assert.notEqual(auditSkill(join(process.cwd(), "skills", "skill-gate")).risk, "HIGH");
 
 const temp = mkdtempSync(join(tmpdir(), "skill-gate-"));
+const repoBoundary = join(temp, "repo-boundary");
+const nestedSkill = join(repoBoundary, "react", "components");
+const outsideSkill = join(temp, "outside-skill");
+mkdirSync(nestedSkill, { recursive: true });
+mkdirSync(outsideSkill, { recursive: true });
+writeFileSync(join(nestedSkill, "SKILL.md"), "---\nname: react-components\ndescription: nested\n---\n");
+writeFileSync(join(outsideSkill, "SKILL.md"), "---\nname: outside\ndescription: outside\n---\n");
+assert.equal(findSkillDir(repoBoundary, "react:components"), nestedSkill);
+assert.equal(resolveCandidateInRepo("owner/repo@react:components", repoBoundary).ok, true);
+assert.equal(resolveCandidateInRepo("owner/repo@missing", repoBoundary).ok, false);
+assert.throws(() => findSkillDir(repoBoundary, "../outside-skill"), /outside repo/);
+
 const badSkill = join(temp, "bad-skill");
 mkdirSync(badSkill, { recursive: true });
 writeFileSync(join(badSkill, "SKILL.md"), "---\nname: ../../escape\ndescription: bad\n---\n");
@@ -179,6 +225,15 @@ assert.match(JSON.parse(readFileSync(join(session, "manifest.json"), "utf8")).us
 assert.match(JSON.parse(readFileSync(join(session, "manifest.json"), "utf8")).expiresAt, /\d{4}-/);
 assert.match(installText("local", true, temp), /Installed pinned inspected skill/);
 assert.equal(existsSync(join(temp, ".skill-gate", "project-skills", "demo", "SKILL.md")), true);
+assert.match(applyText("local", true, temp), /Applied latest inspected skill/);
+const upgradeTemp = mkdtempSync(join(tmpdir(), "skill-gate-upgrade-"));
+const upgradeSource = join(upgradeTemp, "upgrade-source");
+mkdirSync(upgradeSource, { recursive: true });
+writeFileSync(join(upgradeSource, "SKILL.md"), "---\nname: upgrade-source\ndescription: upgrade\n---\n");
+inspectSource(upgradeSource, { cwd: upgradeTemp });
+assert.match(applyText(upgradeSource, true, upgradeTemp), /Applied latest inspected skill/);
+assert.match(upgradeText(upgradeSource, upgradeTemp), /Upgrade check/);
+assert.match(upgradeText(upgradeSource, upgradeTemp), /Changed: No/);
 writeFileSync(join(session, "manifest.json"), JSON.stringify({
   skill: "demo",
   source: "local",
@@ -267,4 +322,41 @@ assert.equal(existsSync(session), false);
 assert.throws(() => safeRemove(resolve(temp, ".skill-gate"), resolve(temp, "outside")), /Refusing/);
 assert.throws(() => safeRemove(resolve(temp, ".skill-gate"), resolve(temp, ".skill-gate")), /Refusing/);
 
-console.log("self-check ok");
+async function asyncChecks(): Promise<void> {
+  const rawRecommend = [
+    "owner/good@react 2K installs",
+    "  https://skills.sh/owner/good/react",
+    "owner/archived@react 2K installs",
+    "  https://skills.sh/owner/archived/react",
+    "owner/stale@react 2K installs",
+    "  https://skills.sh/owner/stale/react",
+    "owner/nolicense@react 2K installs",
+    "  https://skills.sh/owner/nolicense/react",
+    "owner/badresolver@react 2K installs",
+    "  https://skills.sh/owner/badresolver/react"
+  ].join("\n");
+  const recommendation = await recommend("build a React dashboard", "explorer", false, {
+    rawSearch: rawRecommend,
+    now: new Date("2026-06-24T00:00:00Z"),
+    factsProvider: (source) => ({
+      owner: source.owner,
+      repo: source.repo,
+      archived: source.repo === "archived",
+      license: source.repo === "nolicense" ? null : "MIT",
+      updatedAt: source.repo === "stale" ? "2024-01-01T00:00:00Z" : "2026-06-01T00:00:00Z"
+    }),
+    resolver: (source) => source.includes("badresolver") ? { ok: false, error: "missing SKILL.md" } : { ok: true, skill: "react" }
+  });
+  assert.match(recommendation, /owner\/good@react/);
+  assert.doesNotMatch(recommendation, /owner\/archived@react/);
+  assert.doesNotMatch(recommendation, /owner\/stale@react/);
+  assert.doesNotMatch(recommendation, /owner\/nolicense@react/);
+  assert.doesNotMatch(recommendation, /owner\/badresolver@react/);
+}
+
+asyncChecks()
+  .then(() => console.log("self-check ok"))
+  .catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });

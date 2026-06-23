@@ -47,6 +47,8 @@ Recommended skills
 1. vercel-labs/agent-skills@vercel-react-best-practices
    Installs: 497,300
    Fit: 100/100; Trust: 90/100
+   Quality: publisher vercel-labs; updated 2026-06-15; license MIT; archived No
+   Resolver: OK
    Next: skill-gate inspect vercel-labs/agent-skills@vercel-react-best-practices
 ```
 
@@ -99,16 +101,18 @@ Local checkout examples use `node dist/src/cli.js <command>`. If the package bin
 
 | Command | What it does |
 |---|---|
-| `recommend "<task>"` | Search real skill sources and return 0 to 3 candidates. |
+| `recommend "<task>"` | Search real skill sources, filter GitHub metadata, dry-run resolver, and return 0 to 3 candidates. |
 | `inspect <source> [--task "<task>"]` | Copy or clone a skill into `.skill-gate/sessions/<id>/`, audit it, and show a decision page. |
 | `use <source> --approve` | Consume the inspected pinned session for one temporary use. |
 | `view <source>` | Download for review without approval. |
 | `install <source> --approve` | Keep the inspected pinned files in this project. |
+| `upgrade <source>` | Inspect the latest remote version and report whether it changed. |
+| `apply <source> --approve` | Apply the latest inspected copy to this project. |
 | `delegate "<task>"` | Produce a multi-agent split plan without spawning agents or touching files. |
 | `status` | Show temporary sessions and approval state. |
 | `pack [name]` | Save current sessions as a reusable pack. |
 | `cleanup [--approve]` | Preview, then delete only manifest-owned paths inside `.skill-gate` with approval. |
-| `diff <source>` | Compare the pinned commit with current remote HEAD. |
+| `diff <source>` | Compare the pinned commit with current remote HEAD and show file stat when available. |
 
 Sources can be local paths, `owner/repo@skill`, `owner/repo@skill#<40-hex-commit>`, GitHub repo URLs, or GitHub tree URLs such as `https://github.com/org/repo/tree/main/path/to/skill`.
 
@@ -143,7 +147,7 @@ Chinese usage notes: [USAGE.md](USAGE.md).
 npm test
 ```
 
-The test is small on purpose: parser, thresholds, delegation, dedupe, risk scan, one-time use, pack, session, and cleanup guards.
+The test is small on purpose: parser, metadata filters, resolver boundaries, thresholds, delegation, dedupe, risk scan, one-time use, pack, session, and cleanup guards.
 
 ## License
 

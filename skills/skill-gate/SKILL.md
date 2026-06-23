@@ -29,6 +29,7 @@ If the npm bin is on PATH, `skill-gate <command>` is equivalent.
    - Use `--mode trusted`, `--mode popular`, or `--mode explorer` to select install thresholds.
    - Use `--force` only when the task is a specialized domain the keyword gate missed.
    - Show 0 to 3 non-overlapping skills.
+   - Keep only candidates that pass GitHub metadata and resolver checks: publisher/source match, not archived, license present, updated within policy, and `SKILL.md` resolvable.
    - Prefer concrete install counts over repository stars.
    - Prefer one broad skill over several narrow skills when coverage truly overlaps. The v1 CLI only removes exact duplicate sources; Codex must still apply judgment before recommending.
    - If more than one candidate is plausible, ask the user to choose before inspecting or using one.
@@ -48,6 +49,8 @@ If the npm bin is on PATH, `skill-gate <command>` is equivalent.
 5. Apply the user's choice.
    - Run `node dist/src/cli.js use <owner/repo@skill> --approve` only after user approval; it reuses and consumes the already inspected pinned session once.
    - Run `node dist/src/cli.js install <owner/repo@skill> --approve` only after explicit project-install approval; it copies the already inspected pinned files into `.skill-gate/project-skills/`.
+   - Run `node dist/src/cli.js upgrade <owner/repo@skill>` to inspect the latest remote version before applying updates.
+   - Run `node dist/src/cli.js apply <owner/repo@skill> --approve` only after explicit approval to apply the latest inspected copy.
    - Run `node dist/src/cli.js view <owner/repo@skill>` when the user wants to inspect files without approval.
    - Run `node dist/src/cli.js reject <owner/repo@skill>` or do nothing when the user rejects.
    - Read the temporary skill from `.skill-gate/sessions/<id>/skills/<skill>/SKILL.md`.
@@ -104,15 +107,17 @@ Read `references/trust-policy.md` before changing recommendation thresholds, sou
 
 ## Commands
 
-- `node dist/src/cli.js recommend "<task>"`: analyze the task and recommend 0 to 3 skills.
+- `node dist/src/cli.js recommend "<task>"`: analyze the task and recommend 0 to 3 skills after install threshold, GitHub metadata, and resolver checks.
 - `node dist/src/cli.js delegate "<task>"`: create a plan-only multi-agent work split with reviewer checklist.
 - `node dist/src/cli.js inspect <source>`: clone or read a skill into an isolated session and write `audit.json`; source may be local path, `owner/repo@skill`, `owner/repo@skill#40hexcommit`, GitHub repo URL, or GitHub tree URL.
 - `node dist/src/cli.js use <source> --approve`: approve and read the latest inspected pinned session for that source once.
 - `node dist/src/cli.js view <source>`: inspect and show the temporary file path without approval.
 - `node dist/src/cli.js install <source> --approve`: copy the latest inspected pinned session into `.skill-gate/project-skills/`.
+- `node dist/src/cli.js upgrade <source>`: inspect the latest remote source and report whether it changed.
+- `node dist/src/cli.js apply <source> --approve`: apply the latest inspected pinned session into `.skill-gate/project-skills/`.
 - `node dist/src/cli.js reject [source]`: record an explicit no-op rejection.
 - `node dist/src/cli.js pack [name]`: save current temporary sessions as a reusable pack.
 - `node dist/src/cli.js status`: list temporary sessions and risks.
 - `node dist/src/cli.js cleanup`: preview current session files recorded in manifests.
 - `node dist/src/cli.js cleanup --approve`: delete only current session files recorded in manifests after explicit user approval.
-- `node dist/src/cli.js diff <source>`: compare the pinned commit with the latest remote commit.
+- `node dist/src/cli.js diff <source>`: compare the pinned commit with the latest remote commit and show file stat when available.

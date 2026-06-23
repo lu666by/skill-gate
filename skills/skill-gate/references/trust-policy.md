@@ -10,6 +10,15 @@ Default mode is Popular:
 - Popular: at least 1000 installs.
 - Explorer: no install threshold; still requires inspect and explicit use/install approval.
 
-V1 enforces install thresholds and exact-source deduplication. Archived, publisher, updated/stale, license, compatibility, and description-vs-content checks need a source metadata provider; until then they must be treated as unknown instead of inferred.
+V1 enforces install thresholds, exact-source deduplication, GitHub metadata checks, and resolver dry-runs.
+
+Reject recommendations when:
+
+- Catalog URL does not match the candidate source.
+- GitHub publisher/repo metadata does not match the source.
+- Repository is archived.
+- License metadata is missing.
+- Repository update date is missing or older than 365 days.
+- The source cannot resolve to a `SKILL.md` before inspect.
 
 Recommend at most 3 skills. Do not collapse different capability names unless the source string is exactly duplicated.

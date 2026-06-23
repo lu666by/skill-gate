@@ -6,6 +6,7 @@ import {
   existsSync,
   closeSync,
   lstatSync,
+  mkdtempSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -14,6 +15,7 @@ import {
   rmSync,
   writeFileSync
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 export type Risk = "LOW" | "MEDIUM" | "HIGH";
@@ -22,6 +24,26 @@ export type Candidate = {
   source: string;
   installs: number;
   url?: string;
+};
+
+export type RepoFacts = {
+  owner: string;
+  repo: string;
+  archived: boolean;
+  license: string | null;
+  updatedAt: string | null;
+  defaultBranch?: string;
+};
+
+export type ResolverCheck = {
+  ok: boolean;
+  skill?: string;
+  error?: string;
+};
+
+export type CandidateQuality = {
+  accepted: boolean;
+  notes: string[];
 };
 
 export type ThresholdMode = "trusted" | "popular" | "explorer";
@@ -86,6 +108,9 @@ type ScoredCandidate = Candidate & {
   trust: number;
   tags: string[];
   reason: string;
+  facts?: RepoFacts;
+  resolver?: ResolverCheck;
+  qualityNotes?: string[];
 };
 
 type DecisionScores = {
@@ -101,6 +126,14 @@ type NeedRule = {
   pattern: RegExp;
   reason: string;
   query: string;
+};
+
+type RecommendDeps = {
+  rawSearch?: string;
+  cwd?: string;
+  now?: Date;
+  factsProvider?: (source: ParsedSource) => Promise<RepoFacts> | RepoFacts;
+  resolver?: (source: string, cwd: string) => ResolverCheck;
 };
 
 const ansiPattern = /\u001b\[[0-9;]*m/g;
@@ -176,7 +209,7 @@ export function thresholdForMode(mode: ThresholdMode): number {
   return 1000;
 }
 
-export function recommend(task: string, mode: ThresholdMode = "popular", force = false): string {
+export async function recommend(task: string, mode: ThresholdMode = "popular", force = false, deps: RecommendDeps = {}): Promise<string> {
   const gate = taskNeedsSkill(task);
   if (!gate.needed && !force) {
     return [
@@ -188,12 +221,13 @@ export function recommend(task: string, mode: ThresholdMode = "popular", force =
   const query = queryForTask(task);
   let raw: string;
   try {
-    raw = run("npx", ["--yes", "skills", "find", query], process.cwd());
+    raw = deps.rawSearch ?? run("npx", ["--yes", "skills", "find", query], deps.cwd || process.cwd());
   } catch {
     throw new Error(`search failed: npx skills find ${query}`);
   }
   const minInstalls = thresholdForMode(mode);
-  const candidates = dedupeCandidates(parseSkillsFind(raw).filter((item) => item.installs >= minInstalls))
+  const reviewed = await reviewRecommendCandidates(dedupeCandidates(parseSkillsFind(raw).filter((item) => item.installs >= minInstalls)).slice(0, 8), deps.cwd || process.cwd(), deps);
+  const candidates = reviewed.accepted
     .map((item) => scoreCandidate(task, item))
     .sort((a, b) => (b.fit * 2 + b.trust) - (a.fit * 2 + a.trust) || b.installs - a.installs)
     .slice(0, 3);
@@ -201,7 +235,8 @@ export function recommend(task: string, mode: ThresholdMode = "popular", force =
     return [
       "Skill Gate analysis",
       gate.reasons.length ? `External expertise may help with: ${gate.reasons.join(", ")}` : "Forced search: keyword gate did not find a built-in reason.",
-      `No skill met the ${mode} install threshold (${minInstalls}).`,
+      reviewed.rejected.length ? "No skill passed metadata and resolver checks." : `No skill met the ${mode} install threshold (${minInstalls}).`,
+      ...reviewed.rejected.slice(0, 5).map((item) => `- ${item.source}: ${item.notes.join("; ")}`),
       "Continue with Codex only or rerun with --mode explorer."
     ].join("\n");
   }
@@ -217,10 +252,88 @@ export function recommend(task: string, mode: ThresholdMode = "popular", force =
       `   Fit: ${item.fit}/100; Trust: ${item.trust}/100`,
       `   Tags: ${item.tags.length ? item.tags.join(", ") : "unknown"}`,
       `   Why: ${item.reason}`,
+      item.facts ? `   Quality: publisher ${item.facts.owner}; updated ${dateOnly(item.facts.updatedAt)}; license ${item.facts.license}; archived ${yesNo(item.facts.archived)}` : undefined,
+      item.resolver ? `   Resolver: ${item.resolver.ok ? `OK (${item.resolver.skill})` : `Failed (${item.resolver.error})`}` : undefined,
+      item.qualityNotes?.length ? `   Checks: ${item.qualityNotes.join("; ")}` : undefined,
       item.url ? `   Catalog: ${item.url}` : undefined,
       `   Next: skill-gate inspect ${item.source}`
     ].filter(Boolean).join("\n"))
   ].join("\n");
+}
+
+async function reviewRecommendCandidates(candidates: Candidate[], cwd: string, deps: RecommendDeps = {}): Promise<{
+  accepted: Array<Candidate & { facts: RepoFacts; resolver: ResolverCheck; qualityNotes: string[] }>;
+  rejected: Array<{ source: string; notes: string[] }>;
+}> {
+  const accepted: Array<Candidate & { facts: RepoFacts; resolver: ResolverCheck; qualityNotes: string[] }> = [];
+  const rejected: Array<{ source: string; notes: string[] }> = [];
+  const factsCache = new Map<string, RepoFacts>();
+  for (const candidate of candidates) {
+    let parsed: ParsedSource;
+    try {
+      parsed = parseSkillSource(candidate.source);
+    } catch (error) {
+      rejected.push({ source: candidate.source, notes: [errorMessage(error)] });
+      continue;
+    }
+    try {
+      const cacheKey = `${parsed.owner}/${parsed.repo}`.toLowerCase();
+      let facts = factsCache.get(cacheKey);
+      if (!facts) {
+        facts = await (deps.factsProvider ? deps.factsProvider(parsed) : fetchRepoFacts(parsed));
+        factsCache.set(cacheKey, facts);
+      }
+      let resolver: ResolverCheck = { ok: true, skill: parsed.skill };
+      let quality = evaluateCandidateQuality(candidate, facts, resolver, deps.now);
+      if (quality.accepted) {
+        resolver = deps.resolver ? deps.resolver(candidate.source, cwd) : resolveCandidateDryRun(candidate.source, cwd);
+        quality = evaluateCandidateQuality(candidate, facts, resolver, deps.now);
+      }
+      if (quality.accepted) accepted.push({ ...candidate, facts, resolver, qualityNotes: quality.notes });
+      else rejected.push({ source: candidate.source, notes: quality.notes });
+    } catch (error) {
+      rejected.push({ source: candidate.source, notes: [`metadata unavailable: ${errorMessage(error)}`] });
+    }
+  }
+  return { accepted, rejected };
+}
+
+export function evaluateCandidateQuality(candidate: Candidate, facts: RepoFacts, resolver: ResolverCheck, now = new Date()): CandidateQuality {
+  const notes: string[] = [];
+  const sourceMatch = candidateCatalogMatchesSource(candidate);
+  if (!sourceMatch.accepted) notes.push(...sourceMatch.notes);
+  const parsed = parseSkillSource(candidate.source);
+  if (facts.owner.toLowerCase() !== parsed.owner.toLowerCase() || facts.repo.toLowerCase() !== parsed.repo.toLowerCase()) {
+    notes.push(`publisher mismatch: ${facts.owner}/${facts.repo}`);
+  }
+  if (facts.archived) notes.push("repo archived");
+  if (!facts.license || facts.license === "NOASSERTION") notes.push("license missing");
+  if (!facts.updatedAt) {
+    notes.push("updated date missing");
+  } else if (!Number.isFinite(Date.parse(facts.updatedAt))) {
+    notes.push(`updated date invalid: ${facts.updatedAt}`);
+  } else if (daysSince(facts.updatedAt, now) > 365) {
+    notes.push(`stale: updated ${dateOnly(facts.updatedAt)}`);
+  }
+  if (!resolver.ok) notes.push(`resolver failed: ${resolver.error || "unknown error"}`);
+  return {
+    accepted: notes.length === 0,
+    notes: notes.length ? notes : ["metadata OK", "resolver OK"]
+  };
+}
+
+export function candidateCatalogMatchesSource(candidate: Candidate): CandidateQuality {
+  if (!candidate.url) return { accepted: false, notes: ["catalog URL missing"] };
+  if (!candidate.url.startsWith("https://skills.sh/")) return { accepted: false, notes: [`unsupported catalog URL: ${candidate.url}`] };
+  try {
+    const source = parseSkillSource(candidate.source);
+    const catalog = parseSkillSource(candidate.url);
+    const sameRepo = source.owner.toLowerCase() === catalog.owner.toLowerCase() && source.repo.toLowerCase() === catalog.repo.toLowerCase();
+    const sameSkill = normalizeSkillIdentity(source.skill) === normalizeSkillIdentity(catalog.skill);
+    return sameRepo && sameSkill ? { accepted: true, notes: ["catalog source verified"] } : { accepted: false, notes: [`catalog/source mismatch: ${candidate.url}`] };
+  } catch (error) {
+    return { accepted: false, notes: [errorMessage(error)] };
+  }
 }
 
 type Lane = {
@@ -470,7 +583,7 @@ function decisionScores(audit: Audit, manifest: Manifest, task?: string): Decisi
     task ? (overlap.length ? `Fit tags: ${overlap.join(", ")}` : "No task tag matched; benefit is weak.") : "Fit is unknown; pass --task to score usefulness.",
     manifest.installCount === null ? "Trust uses no install count; source metadata is unknown." : `Trust uses ${manifest.installCount.toLocaleString()} installs.`,
     "Risk score is severity; lower is safer.",
-    "Maintenance is package hygiene only; archived/license/update metadata still requires a source metadata check."
+    "Maintenance is local package hygiene only; recommend checks GitHub archived/license/update metadata before listing candidates."
   ];
   let verdict = "Usable once after approval.";
   if (audit.risk === "HIGH") verdict = "Reject for use; view-only.";
@@ -526,6 +639,7 @@ export function installText(source: string, approved: boolean, cwd = process.cwd
   const targetDir = safeChildPath(join(resolve(cwd), ".skill-gate", "project-skills"), skillName);
   if (existsSync(targetDir)) rmSync(targetDir, { recursive: true, force: true });
   cpSync(sourceDir, targetDir, { recursive: true });
+  writeAppliedManifest(cwd, manifest);
   return [
     "Installed pinned inspected skill for this project.",
     `Source: ${source}`,
@@ -534,6 +648,26 @@ export function installText(source: string, approved: boolean, cwd = process.cwd
     `Path: ${targetDir}`,
     `Risk: ${manifest.risk}`,
     manifest.risk === "HIGH" ? "V1 rule still applies: do not execute bundled scripts automatically." : "Project install complete."
+  ].join("\n");
+}
+
+export function applyText(source: string, approved: boolean, cwd = process.cwd()): string {
+  return installText(source, approved, cwd).replace("Installed pinned inspected skill for this project.", "Applied latest inspected skill for this project.");
+}
+
+export function upgradeText(source: string, cwd = process.cwd()): string {
+  const current = readAppliedManifest(source, cwd)?.commitSha;
+  const { manifest, audit, sessionDir } = inspectSource(source, { cwd });
+  const changed = current ? current !== manifest.commitSha : true;
+  return [
+    "Upgrade check",
+    `Source: ${source}`,
+    current ? `Current: ${current}` : "Current: none",
+    `Latest inspected: ${manifest.commitSha}`,
+    `Changed: ${yesNo(changed)}`,
+    `Risk: ${audit.risk}`,
+    `Session: ${sessionDir}`,
+    changed ? `Next: skill-gate apply ${source} --approve` : "No apply needed."
   ].join("\n");
 }
 
@@ -630,20 +764,100 @@ function safeSkillGateTarget(root: string, target: string): string {
 export function diffText(source: string, cwd = process.cwd()): string {
   const parsed = parseSkillSource(source);
   const latest = run("git", ["ls-remote", parsed.repoUrl, "HEAD"], cwd).split(/\s+/)[0];
-  const current = readManifests(cwd).find((item) => item.manifest.source === source)?.manifest.commitSha;
+  const current = readAppliedManifest(source, cwd)?.commitSha || latestInspectedSession(source, cwd)?.manifest.commitSha;
   if (!current) return `No local manifest for ${source}. Latest remote commit: ${latest}`;
   if (current === latest) return `${source} is up to date at ${current}.`;
-  return `${source} changed.\nLocal:  ${current}\nRemote: ${latest}`;
+  const lines = [
+    `${source} changed.`,
+    `Local:  ${current}`,
+    `Remote: ${latest}`
+  ];
+  if (parsed.path) {
+    const stat = remoteDiffStat(parsed, current, latest, cwd);
+    lines.push("", "Changed files:", stat || "(git diff stat unavailable)");
+  }
+  return lines.join("\n");
 }
 
-function main(): void {
+function remoteDiffStat(parsed: ParsedSource, current: string, latest: string, cwd: string): string {
+  const temp = mkdtempSync(join(tmpdir(), "skill-gate-diff-"));
+  try {
+    const repoDir = join(temp, "repo");
+    run("git", ["clone", "--quiet", parsed.repoUrl, repoDir], cwd);
+    const args = ["-C", repoDir, "diff", "--stat", current, latest];
+    if (parsed.path) args.push("--", parsed.path);
+    return run("git", args, cwd, true).trim();
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+}
+
+export function resolveCandidateDryRun(source: string, cwd = process.cwd()): ResolverCheck {
+  const temp = mkdtempSync(join(tmpdir(), "skill-gate-resolve-"));
+  try {
+    const parsed = parseSkillSource(source);
+    const repoDir = join(temp, "repo");
+    if (parsed.ref) {
+      run("git", ["clone", "--quiet", parsed.repoUrl, repoDir], cwd);
+      run("git", ["-C", repoDir, "checkout", "--quiet", "--detach", parsed.ref], cwd);
+    } else {
+      run("git", ["clone", "--depth", "1", "--quiet", parsed.repoUrl, repoDir], cwd);
+    }
+    const skillDir = parsed.path ? skillDirAtPath(repoDir, parsed.path) : findSkillDir(repoDir, parsed.skill);
+    return { ok: true, skill: storageSkillName(readSkillName(join(skillDir, "SKILL.md")), parsed.skill, basename(skillDir)) };
+  } catch (error) {
+    return { ok: false, error: errorMessage(error) };
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+}
+
+export function resolveCandidateInRepo(source: string, repoDir: string): ResolverCheck {
+  try {
+    const parsed = parseSkillSource(source);
+    const skillDir = parsed.path ? skillDirAtPath(repoDir, parsed.path) : findSkillDir(repoDir, parsed.skill);
+    return { ok: true, skill: storageSkillName(readSkillName(join(skillDir, "SKILL.md")), parsed.skill, basename(skillDir)) };
+  } catch (error) {
+    return { ok: false, error: errorMessage(error) };
+  }
+}
+
+export async function fetchRepoFacts(parsed: ParsedSource, fetcher = globalThis.fetch): Promise<RepoFacts> {
+  if (!fetcher) throw new Error("global fetch is unavailable");
+  const headers: Record<string, string> = {
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "skill-gate"
+  };
+  if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+  const response = await fetcher(`https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}`, { headers });
+  if (!response.ok) throw new Error(`GitHub API ${response.status}`);
+  const data = await response.json() as {
+    owner?: { login?: string };
+    name?: string;
+    archived?: boolean;
+    license?: { spdx_id?: string; key?: string } | null;
+    pushed_at?: string | null;
+    updated_at?: string | null;
+    default_branch?: string;
+  };
+  return {
+    owner: data.owner?.login || parsed.owner,
+    repo: data.name || parsed.repo,
+    archived: data.archived === true,
+    license: data.license?.spdx_id || data.license?.key || null,
+    updatedAt: data.pushed_at || data.updated_at || null,
+    defaultBranch: data.default_branch
+  };
+}
+
+async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
   try {
     if (command === "recommend" || command === "search") {
       const mode = parseMode(args);
       const force = args.includes("--force");
       const task = args.filter((arg, index) => !["--explorer", "--trusted", "--popular", "--force", "--mode"].includes(arg) && args[index - 1] !== "--mode").join(" ");
-      console.log(recommend(task, mode, force));
+      console.log(await recommend(task, mode, force));
       return;
     }
     if (command === "inspect") {
@@ -668,6 +882,16 @@ function main(): void {
     if (command === "install") {
       requireSource(args[0]);
       console.log(installText(args[0], args.includes("--approve")));
+      return;
+    }
+    if (command === "upgrade") {
+      requireSource(args[0]);
+      console.log(upgradeText(args[0]));
+      return;
+    }
+    if (command === "apply") {
+      requireSource(args[0]);
+      console.log(applyText(args[0], args.includes("--approve")));
       return;
     }
     if (command === "pack") {
@@ -709,6 +933,8 @@ function helpText(): string {
     "  skill-gate use <source> --approve",
     "  skill-gate view <source>",
     "  skill-gate install <source> --approve",
+    "  skill-gate upgrade <source>",
+    "  skill-gate apply <source> --approve",
     "  skill-gate reject [source]",
     "  skill-gate pack [name]",
     "  skill-gate status",
@@ -744,7 +970,7 @@ export function parseSkillSource(source: string): ParsedSource {
     owner: match[1],
     repo: match[2],
     repoUrl: `https://github.com/${match[1]}/${match[2]}.git`,
-    skill: match[3],
+    skill: validateSkillSelector(match[3]),
     ref
   };
 }
@@ -780,7 +1006,14 @@ function validateCommitRef(ref: string): string {
   return ref;
 }
 
-function findSkillDir(repoDir: string, skill?: string): string {
+function validateSkillSelector(skill: string): string {
+  if (!/^[A-Za-z0-9._:-]+$/.test(skill) || skill === "." || skill === ".." || skill.includes("..")) {
+    throw new Error(`Invalid skill selector: ${skill}`);
+  }
+  return skill;
+}
+
+export function findSkillDir(repoDir: string, skill?: string): string {
   if (!skill) {
     if (existsSync(join(repoDir, "SKILL.md"))) return repoDir;
     const matches = walkDirs(repoDir).filter((dir) => existsSync(join(dir, "SKILL.md")));
@@ -789,8 +1022,8 @@ function findSkillDir(repoDir: string, skill?: string): string {
   }
   const aliases = skillAliases(skill);
   const direct = [
-    ...aliases.map((name) => join(repoDir, name, "SKILL.md")),
-    ...aliases.map((name) => join(repoDir, "skills", name, "SKILL.md"))
+    ...aliases.map((name) => safeRepoPath(repoDir, name, "SKILL.md")),
+    ...aliases.map((name) => safeRepoPath(repoDir, "skills", name, "SKILL.md"))
   ];
   for (const file of direct) {
     if (existsSync(file)) return dirname(file);
@@ -802,6 +1035,13 @@ function findSkillDir(repoDir: string, skill?: string): string {
   if (frontmatterMatches.length > 1) throw new Error(`Multiple SKILL.md files declare ${skill}; use a GitHub /tree/<ref>/<path> URL.`);
   if (existsSync(join(repoDir, "SKILL.md"))) return repoDir;
   throw new Error(`Could not find SKILL.md for ${skill}`);
+}
+
+function safeRepoPath(repoDir: string, ...parts: string[]): string {
+  const target = resolve(repoDir, ...parts);
+  const rel = relative(resolve(repoDir), target);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) throw new Error(`Refusing skill selector outside repo: ${parts.join("/")}`);
+  return target;
 }
 
 function skillDirAtPath(repoDir: string, path: string): string {
@@ -846,6 +1086,19 @@ function readManifests(cwd: string): Array<{ manifest: Manifest; path: string }>
     .map((entry) => join(root, entry.name, "manifest.json"))
     .filter((file) => existsSync(file))
     .map((file) => ({ manifest: JSON.parse(readFileSync(file, "utf8")) as Manifest, path: file }));
+}
+
+function appliedManifestPath(cwd: string, source: string): string {
+  return join(resolve(cwd), ".skill-gate", "project-skills", ".applied", `${createHash("sha256").update(source).digest("hex")}.json`);
+}
+
+function writeAppliedManifest(cwd: string, manifest: Manifest): void {
+  writeJson(appliedManifestPath(cwd, manifest.source), manifest);
+}
+
+function readAppliedManifest(source: string, cwd: string): Manifest | null {
+  const file = appliedManifestPath(cwd, source);
+  return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) as Manifest : null;
 }
 
 function latestInspectedSession(source: string, cwd = process.cwd()): { manifest: Manifest; path: string } | null {
@@ -983,12 +1236,12 @@ function isTextish(file: string): boolean {
   return /\.(md|txt|yaml|yml|json|js|mjs|cjs|ts|tsx|jsx|sh|bash|zsh|ps1|bat|cmd|py)$/i.test(file);
 }
 
-function scoreCandidate(task: string, candidate: Candidate): ScoredCandidate {
+function scoreCandidate(task: string, candidate: Candidate & { facts?: RepoFacts; resolver?: ResolverCheck; qualityNotes?: string[] }): ScoredCandidate {
   const tags = capabilityTags(candidate.source);
   const taskTags = capabilityTags(task);
   const overlap = tags.filter((tag) => taskTags.includes(tag));
   const fit = Math.min(100, 35 + overlap.length * 25 + (candidate.source.toLowerCase().includes(queryForTask(task).toLowerCase()) ? 15 : 0));
-  const trust = trustScore(candidate.installs);
+  const trust = trustScore(candidate.installs, candidate.facts);
   return {
     ...candidate,
     fit,
@@ -998,12 +1251,15 @@ function scoreCandidate(task: string, candidate: Candidate): ScoredCandidate {
   };
 }
 
-function trustScore(installs: number | null | undefined): number {
+function trustScore(installs: number | null | undefined, facts?: RepoFacts): number {
   if (!installs) return 45;
-  if (installs >= 100000) return 90;
-  if (installs >= 10000) return 80;
-  if (installs >= 1000) return 65;
-  return 45;
+  let score = 45;
+  if (installs >= 100000) score = 85;
+  else if (installs >= 10000) score = 75;
+  else if (installs >= 1000) score = 60;
+  if (facts?.license) score += 5;
+  if (facts?.updatedAt && daysSince(facts.updatedAt) <= 180) score += 5;
+  return Math.min(95, score);
 }
 
 function capabilityTags(value: string): string[] {
@@ -1025,6 +1281,24 @@ function capabilityTags(value: string): string[] {
     if (pattern.test(lower)) tags.push(tag);
   }
   return [...new Set(tags)];
+}
+
+function normalizeSkillIdentity(skill: string | undefined): string {
+  return (skill || "").toLowerCase().replace(/[\\/]/g, ":");
+}
+
+function daysSince(value: string, now = new Date()): number {
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return Number.POSITIVE_INFINITY;
+  return Math.floor((now.getTime() - time) / 86_400_000);
+}
+
+function dateOnly(value: string | null | undefined): string {
+  return value ? value.slice(0, 10) : "unknown";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function queryForTask(task: string): string {
@@ -1137,4 +1411,4 @@ function requireSource(source: string | undefined): asserts source is string {
   if (!source) throw new Error("missing skill source");
 }
 
-if (require.main === module) main();
+if (require.main === module) void main();

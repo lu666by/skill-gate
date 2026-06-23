@@ -40,6 +40,13 @@ node dist/src/cli.js recommend "build a polished React admin dashboard"
 ```
 
 默认是 Popular 模式：只展示安装量 >= 1000 的候选，最多 3 个。
+候选还会过一层 GitHub metadata 和 resolver dry-run：
+
+- publisher/source 必须和 catalog 对得上
+- archived repo 会被过滤
+- 缺 license 会被过滤
+- updated 超过 365 天会被过滤
+- 找不到 `SKILL.md` / selector 解析失败会被过滤
 
 可选模式：
 
@@ -138,6 +145,18 @@ node dist/src/cli.js use vercel-labs/agent-skills@vercel-react-best-practices --
 node dist/src/cli.js install vercel-labs/agent-skills@vercel-react-best-practices --approve
 ```
 
+检查上游是否有新版：
+
+```powershell
+node dist/src/cli.js upgrade vercel-labs/agent-skills@vercel-react-best-practices
+```
+
+把最新已 inspect 的版本应用到项目：
+
+```powershell
+node dist/src/cli.js apply vercel-labs/agent-skills@vercel-react-best-practices --approve
+```
+
 安装位置：
 
 ```text
@@ -206,6 +225,8 @@ node dist/src/cli.js inspect <owner/repo@skill[#commit]>
 node dist/src/cli.js view <owner/repo@skill>
 node dist/src/cli.js use <owner/repo@skill> --approve
 node dist/src/cli.js install <owner/repo@skill> --approve
+node dist/src/cli.js upgrade <owner/repo@skill>
+node dist/src/cli.js apply <owner/repo@skill> --approve
 node dist/src/cli.js reject <owner/repo@skill>
 node dist/src/cli.js status
 node dist/src/cli.js pack <name>
@@ -218,6 +239,7 @@ node dist/src/cli.js diff <owner/repo@skill>
 
 - 判断是否需要 Skill 仍是正则 gate，不是真语义边际收益分析。
 - 去重只去 exact source duplicate；不会猜测能力覆盖。
-- 推荐质量过滤还没检查 publisher、updated、archived、license、compatibility；inspect 决策页会把这些元数据标成未知，不伪造。
+- recommend 会检查 publisher/source、updated、archived、license 和 resolver compatibility；Fit/Trust 仍是启发式，不是真质量模型。
+- upgrade/apply 是最小流程：先 inspect 最新版本，再 apply 到 project-skills；没有自动合并策略。
 - 风险扫描只看 `SKILL.md`、`scripts/` 和 package install hooks 里的危险行为，降低 policy/reference 文字误报；仍然是正则启发式，不是 AST/沙箱。
 - 测试是 MVP self-check，不是完整规则矩阵。

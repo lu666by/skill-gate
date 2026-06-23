@@ -10,5 +10,5 @@
   <path d="M920 104h200v152H920V104Z" fill="#111827" stroke="#22c55e" stroke-width="3"/>
   <path d="m976 181 42 42 70-88" stroke="#22c55e" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
   <text x="80" y="72" fill="#f9fafb" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="38" font-weight="700">Skill Gate</text>
-  <text x="80" y="310" fill="#d1d5db" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24">find useful skills · inspect before use · keep it temporary</text>
+  <text x="80" y="310" fill="#d1d5db" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24">a skill wants in; check its ID first</text>
 </svg>

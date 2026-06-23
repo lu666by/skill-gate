@@ -89,10 +89,17 @@ node dist/src/cli.js delegate "build a React dashboard with API, tests, and READ
 node dist/src/cli.js inspect vercel-labs/agent-skills@vercel-react-best-practices
 ```
 
-`source` 可以是本地路径、`owner/repo@skill`、GitHub repo URL，或固定 ref/子目录的 GitHub tree URL，例如：
+`source` 可以是本地路径、`owner/repo@skill`、`owner/repo@skill#<40位commit>`、GitHub repo URL，或固定 ref/子目录的 GitHub tree URL，例如：
 
 ```powershell
+node dist/src/cli.js inspect vercel-labs/agent-skills@vercel-react-best-practices#0123456789abcdef0123456789abcdef01234567
 node dist/src/cli.js inspect https://github.com/google-labs-code/stitch-skills/tree/main/plugins/stitch-build/skills/react-components
+```
+
+如果要给 Fit 打分，传任务：
+
+```powershell
+node dist/src/cli.js inspect vercel-labs/agent-skills@vercel-react-best-practices --task "build a React dashboard"
 ```
 
 这会把 Skill 下载/复制到隔离目录：
@@ -143,7 +150,7 @@ node dist/src/cli.js install vercel-labs/agent-skills@vercel-react-best-practice
 node dist/src/cli.js reject vercel-labs/agent-skills@vercel-react-best-practices
 ```
 
-`use` 和 `install` 都会复用已经 `inspect` 过的 pinned session，不会重新 clone 最新远端版本。
+`use` 和 `install` 都会复用已经 `inspect` 过的 pinned session，不会重新 clone 最新远端版本。`use` 是一次性的；第二次临时使用需要重新 `inspect`。
 
 ### 4. 查看当前 session
 
@@ -166,10 +173,11 @@ node dist/src/cli.js pack react-ui-pack
 ### 6. 清理临时 session
 
 ```powershell
+node dist/src/cli.js cleanup
 node dist/src/cli.js cleanup --approve
 ```
 
-cleanup 只删除 manifest 记录的 `.skill-gate/sessions/<id>`，不会删除用户已有 Skill，也不会删 pack。没有 `--approve` 时不会删除。
+cleanup 只删除 manifest 记录的 `.skill-gate/sessions/<id>`，不会删除用户已有 Skill，也不会删 pack。没有 `--approve` 时只预览将删除的路径。
 
 ## 风险等级
 
@@ -194,21 +202,22 @@ node dist/src/cli.js recommend "<task>"
 node dist/src/cli.js recommend "<task>" --mode trusted
 node dist/src/cli.js recommend "<task>" --force --mode explorer
 node dist/src/cli.js delegate "<task>"
-node dist/src/cli.js inspect <owner/repo@skill>
+node dist/src/cli.js inspect <owner/repo@skill[#commit]>
 node dist/src/cli.js view <owner/repo@skill>
 node dist/src/cli.js use <owner/repo@skill> --approve
 node dist/src/cli.js install <owner/repo@skill> --approve
 node dist/src/cli.js reject <owner/repo@skill>
 node dist/src/cli.js status
 node dist/src/cli.js pack <name>
+node dist/src/cli.js cleanup
 node dist/src/cli.js cleanup --approve
 node dist/src/cli.js diff <owner/repo@skill>
 ```
 
 ## 当前限制
 
-- 判断是否需要 Skill 还是关键词 gate，不是真语义边际收益分析。
-- 去重是 token overlap，不是真能力覆盖分析。
-- 推荐质量过滤还没检查 publisher、updated、archived、compatibility。
+- 判断是否需要 Skill 仍是正则 gate，不是真语义边际收益分析。
+- 去重只去 exact source duplicate；不会猜测能力覆盖。
+- 推荐质量过滤还没检查 publisher、updated、archived、license、compatibility；inspect 决策页会把这些元数据标成未知，不伪造。
 - 风险扫描只看 `SKILL.md`、`scripts/` 和 package install hooks 里的危险行为，降低 policy/reference 文字误报；仍然是正则启发式，不是 AST/沙箱。
 - 测试是 MVP self-check，不是完整规则矩阵。

@@ -30,13 +30,13 @@ If the npm bin is on PATH, `skill-gate <command>` is equivalent.
    - Use `--force` only when the task is a specialized domain the keyword gate missed.
    - Show 0 to 3 non-overlapping skills.
    - Prefer concrete install counts over repository stars.
-   - Prefer one broad skill over several narrow skills when coverage overlaps. The v1 CLI uses a lightweight token overlap heuristic; Codex must still apply judgment before recommending.
+   - Prefer one broad skill over several narrow skills when coverage truly overlaps. The v1 CLI only removes exact duplicate sources; Codex must still apply judgment before recommending.
    - If more than one candidate is plausible, ask the user to choose before inspecting or using one.
 
 3. Inspect before use.
-   - Run `node dist/src/cli.js inspect <owner/repo@skill>` or a GitHub tree URL when the skill lives in a subdirectory.
+   - Run `node dist/src/cli.js inspect <owner/repo@skill>` or `node dist/src/cli.js inspect <owner/repo@skill#40hexcommit>`; use a GitHub tree URL when the skill lives in a subdirectory.
    - This downloads or copies the candidate into an isolated `.skill-gate/sessions/<id>/` directory so it can be audited.
-   - Summarize source, install count if known, pinned commit, files, capabilities, and risk.
+   - Summarize source, install count if known, pinned commit, decision scores, files, capabilities, and risk.
    - Read `references/risk-policy.md` if risk interpretation matters.
 
 4. Ask the user before loading.
@@ -46,7 +46,7 @@ If the npm bin is on PATH, `skill-gate <command>` is equivalent.
    - Prefer the app's short choice UI when available. If no choice UI is available, ask one concise numbered question in chat.
 
 5. Apply the user's choice.
-   - Run `node dist/src/cli.js use <owner/repo@skill> --approve` only after user approval; it reuses the already inspected pinned session.
+   - Run `node dist/src/cli.js use <owner/repo@skill> --approve` only after user approval; it reuses and consumes the already inspected pinned session once.
    - Run `node dist/src/cli.js install <owner/repo@skill> --approve` only after explicit project-install approval; it copies the already inspected pinned files into `.skill-gate/project-skills/`.
    - Run `node dist/src/cli.js view <owner/repo@skill>` when the user wants to inspect files without approval.
    - Run `node dist/src/cli.js reject <owner/repo@skill>` or do nothing when the user rejects.
@@ -56,6 +56,7 @@ If the npm bin is on PATH, `skill-gate <command>` is equivalent.
 6. Clean up after the task.
    - Run `node dist/src/cli.js status` to show active temporary sessions.
    - When the task appears complete, ask the user whether to delete temporary sessions, keep them, or pack them.
+   - Run `node dist/src/cli.js cleanup` to preview deletion targets.
    - Run `node dist/src/cli.js cleanup --approve` only when the user explicitly chooses delete.
    - Run `node dist/src/cli.js pack <name>` when the user chooses save as reusable pack.
    - Cleanup may delete only paths listed in the session manifest and only inside `.skill-gate`.
@@ -105,12 +106,13 @@ Read `references/trust-policy.md` before changing recommendation thresholds, sou
 
 - `node dist/src/cli.js recommend "<task>"`: analyze the task and recommend 0 to 3 skills.
 - `node dist/src/cli.js delegate "<task>"`: create a plan-only multi-agent work split with reviewer checklist.
-- `node dist/src/cli.js inspect <source>`: clone or read a skill into an isolated session and write `audit.json`; source may be local path, `owner/repo@skill`, GitHub repo URL, or GitHub tree URL.
-- `node dist/src/cli.js use <source> --approve`: approve and read the latest inspected pinned session for that source.
+- `node dist/src/cli.js inspect <source>`: clone or read a skill into an isolated session and write `audit.json`; source may be local path, `owner/repo@skill`, `owner/repo@skill#40hexcommit`, GitHub repo URL, or GitHub tree URL.
+- `node dist/src/cli.js use <source> --approve`: approve and read the latest inspected pinned session for that source once.
 - `node dist/src/cli.js view <source>`: inspect and show the temporary file path without approval.
 - `node dist/src/cli.js install <source> --approve`: copy the latest inspected pinned session into `.skill-gate/project-skills/`.
 - `node dist/src/cli.js reject [source]`: record an explicit no-op rejection.
 - `node dist/src/cli.js pack [name]`: save current temporary sessions as a reusable pack.
 - `node dist/src/cli.js status`: list temporary sessions and risks.
+- `node dist/src/cli.js cleanup`: preview current session files recorded in manifests.
 - `node dist/src/cli.js cleanup --approve`: delete only current session files recorded in manifests after explicit user approval.
 - `node dist/src/cli.js diff <source>`: compare the pinned commit with the latest remote commit.

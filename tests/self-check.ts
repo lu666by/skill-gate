@@ -9,8 +9,10 @@ import {
   dedupeCandidates,
   delegateText,
   installText,
+  inspectText,
   inspectSource,
   packText,
+  parseSkillSource,
   parseSkillsFind,
   safeRemove,
   taskNeedsSkill,
@@ -35,6 +37,9 @@ assert.equal(thresholdForMode("explorer"), 0);
 
 assert.equal(taskNeedsSkill("rename this variable").needed, false);
 assert.equal(taskNeedsSkill("build a polished React admin dashboard").needed, true);
+assert.equal(taskNeedsSkill("reactor control variable").needed, false);
+assert.equal(taskNeedsSkill("paperwork cleanup").needed, false);
+assert.equal(taskNeedsSkill("frontend accessibility audit").needed, true);
 
 const delegation = delegateText("build a React dashboard with API, tests, and README");
 assert.match(delegation, /Reviewer Agent/);
@@ -51,7 +56,18 @@ const deduped = dedupeCandidates([
   { source: "demo/repo@typography-helper", installs: 9000 },
   { source: "demo/repo@frontend-typography", installs: 1000 }
 ]);
-assert.deepEqual(deduped.map((item) => item.source), ["demo/repo@frontend-design", "demo/repo@typography-helper"]);
+assert.deepEqual(deduped.map((item) => item.source), ["demo/repo@frontend-design", "demo/repo@typography-helper", "demo/repo@frontend-typography"]);
+assert.deepEqual(dedupeCandidates([
+  { source: "demo/repo@react-design", installs: 1000 },
+  { source: "demo/repo@react-testing", installs: 900 },
+  { source: "demo/repo@react-design", installs: 10 }
+]).map((item) => item.source), ["demo/repo@react-design", "demo/repo@react-testing"]);
+
+const commit = "0123456789abcdef0123456789abcdef01234567";
+assert.equal(parseSkillSource(`owner/repo@skill#${commit}`).skill, "skill");
+assert.equal(parseSkillSource(`owner/repo@skill#${commit}`).ref, commit);
+assert.throws(() => parseSkillSource("owner/repo@skill#main"), /40-hex/);
+assert.throws(() => parseSkillSource("owner/repo@skill#"), /Empty/);
 
 const fixtureRoot = join(process.cwd(), "fixtures");
 assert.equal(auditSkill(join(fixtureRoot, "safe-skill")).risk, "LOW");
@@ -69,6 +85,19 @@ writeFileSync(join(badSkill, "SKILL.md"), "---\nname: ..\\escape\ndescription: b
 assert.throws(() => inspectSource(badSkill, { cwd: temp, sessionId: "bad-win" }), /Invalid skill name/);
 writeFileSync(join(badSkill, "SKILL.md"), "---\nname: safe-name\ndescription: ok\n---\n\nname: ../../body-is-not-frontmatter\n");
 assert.equal(inspectSource(badSkill, { cwd: temp, sessionId: "body-name" }).manifest.skill, "safe-name");
+const dupSession = inspectSource(badSkill, { cwd: temp, sessionId: "dup" }).sessionDir;
+assert.throws(() => inspectSource(badSkill, { cwd: temp, sessionId: "dup" }), /exist|EEXIST/i);
+assert.equal(existsSync(dupSession), true);
+assert.throws(() => inspectSource(badSkill, { cwd: temp, sessionId: ".." }), /Invalid skill name/);
+const generatedA = inspectSource(badSkill, { cwd: temp }).sessionDir;
+const generatedB = inspectSource(badSkill, { cwd: temp }).sessionDir;
+assert.notEqual(generatedA, generatedB);
+const decision = inspectText(badSkill, { cwd: temp, task: "build a frontend dashboard" });
+assert.match(decision, /Decision:/);
+assert.match(decision, /Fit: \d+\/100/);
+assert.match(decision, /Trust: \d+\/100/);
+assert.match(decision, /Risk: \d+\/100/);
+assert.match(decision, /Maintenance: \d+\/100/);
 cleanupSessions(temp, true);
 
 const auditEdge = join(temp, "audit-edge");
@@ -123,13 +152,31 @@ writeFileSync(join(session, "manifest.json"), JSON.stringify({
   risk: "LOW",
   approvedByUser: true,
   scope: "temporary",
+  expiresAt: "2000-01-01T00:00:00.000Z",
+  createdFiles: [".skill-gate/sessions/test"]
+}));
+assert.throws(() => useText("local", true, temp), /expired/);
+writeFileSync(join(session, "manifest.json"), JSON.stringify({
+  skill: "demo",
+  source: "local",
+  installCount: null,
+  commitSha: "local",
+  risk: "LOW",
+  approvedByUser: true,
+  scope: "temporary",
   createdFiles: [".skill-gate/sessions/test"]
 }));
 assert.match(packText("demo-pack", temp), /Saved reusable pack/);
 assert.equal(existsSync(join(temp, ".skill-gate", "packs", "demo-pack", "skills", "demo", "SKILL.md")), true);
+assert.throws(() => packText("demo-pack", temp), /already exists/);
+assert.throws(() => packText("..", temp), /Invalid skill name/);
+assert.throws(() => packText("bad pack", temp), /Invalid skill name/);
 assert.match(useText("local", true, temp), /Pinned commit: local/);
+assert.throws(() => useText("local", true, temp), /already used/);
 assert.equal(readdirSync(join(temp, ".skill-gate", "sessions")).length, 1);
 assert.equal(JSON.parse(readFileSync(join(session, "manifest.json"), "utf8")).approvedByUser, true);
+assert.match(JSON.parse(readFileSync(join(session, "manifest.json"), "utf8")).usedAt, /\d{4}-/);
+assert.match(JSON.parse(readFileSync(join(session, "manifest.json"), "utf8")).expiresAt, /\d{4}-/);
 assert.match(installText("local", true, temp), /Installed pinned inspected skill/);
 assert.equal(existsSync(join(temp, ".skill-gate", "project-skills", "demo", "SKILL.md")), true);
 writeFileSync(join(session, "manifest.json"), JSON.stringify({
@@ -180,7 +227,39 @@ writeFileSync(join(session, "manifest.json"), JSON.stringify({
   scope: "temporary",
   createdFiles: [".skill-gate/sessions/test"]
 }));
-assert.throws(() => cleanupSessions(temp), /requires user approval/);
+writeFileSync(join(session, "manifest.json"), JSON.stringify({
+  skill: "demo",
+  source: "local",
+  installCount: null,
+  commitSha: "local",
+  risk: "LOW",
+  approvedByUser: true,
+  scope: "temporary",
+  createdFiles: ["../outside"]
+}));
+assert.throws(() => cleanupSessions(temp), /outside .skill-gate/);
+writeFileSync(join(session, "manifest.json"), JSON.stringify({
+  skill: "demo",
+  source: "local",
+  installCount: null,
+  commitSha: "local",
+  risk: "LOW",
+  approvedByUser: true,
+  scope: "temporary",
+  createdFiles: [".skill-gate"]
+}));
+assert.throws(() => cleanupSessions(temp), /outside .skill-gate/);
+writeFileSync(join(session, "manifest.json"), JSON.stringify({
+  skill: "demo",
+  source: "local",
+  installCount: null,
+  commitSha: "local",
+  risk: "LOW",
+  approvedByUser: true,
+  scope: "temporary",
+  createdFiles: [".skill-gate/sessions/test"]
+}));
+assert.match(cleanupSessions(temp), /Cleanup preview: 1/);
 assert.equal(existsSync(session), true);
 assert.match(cleanupSessions(temp, true), /Removed 1/);
 assert.equal(existsSync(session), false);

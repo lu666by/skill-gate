@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   cpSync,
   existsSync,
@@ -60,6 +60,8 @@ export type Manifest = {
   scope: "temporary";
   createdFiles: string[];
   approvedAt?: string;
+  usedAt?: string;
+  expiresAt?: string;
 };
 
 type InspectOptions = {
@@ -67,6 +69,7 @@ type InspectOptions = {
   approved?: boolean;
   sessionId?: string;
   installCount?: number | null;
+  task?: string;
 };
 
 type ParsedSource = {
@@ -78,9 +81,44 @@ type ParsedSource = {
   path?: string;
 };
 
+type ScoredCandidate = Candidate & {
+  fit: number;
+  trust: number;
+  tags: string[];
+  reason: string;
+};
+
+type DecisionScores = {
+  fit: number;
+  trust: number;
+  risk: number;
+  maintenance: number;
+  verdict: string;
+  notes: string[];
+};
+
+type NeedRule = {
+  pattern: RegExp;
+  reason: string;
+  query: string;
+};
+
 const ansiPattern = /\u001b\[[0-9;]*m/g;
 const executableExts = new Set([".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd", ".js", ".mjs", ".cjs", ".ts", ".py"]);
 const maxAuditFileBytes = 1_000_000;
+const needRules: NeedRule[] = [
+  { pattern: /\breact\b/i, reason: "framework-specific workflow", query: "react" },
+  { pattern: /\b(ui|ux|frontend|interface|dashboard)\b/i, reason: "interface design", query: "design" },
+  { pattern: /\b(windows|winui)\b/i, reason: "platform conventions", query: "windows" },
+  { pattern: /\b(accessibility|a11y)\b/i, reason: "accessibility review", query: "accessibility" },
+  { pattern: /\b(pdf|docx|document)\b/i, reason: "document workflow", query: "pdf" },
+  { pattern: /\b(excel|spreadsheet|csv)\b/i, reason: "spreadsheet workflow", query: "spreadsheet" },
+  { pattern: /\b(powerpoint|presentation|slides?|ppt)\b/i, reason: "presentation workflow", query: "powerpoint" },
+  { pattern: /\b(github|pull request|pr|issue|ci)\b/i, reason: "GitHub workflow", query: "github" },
+  { pattern: /\bgmail\b/i, reason: "mail workflow", query: "gmail" },
+  { pattern: /\b(hugging face|fine-?tune|ml training)\b/i, reason: "ML platform workflow", query: "hugging face" },
+  { pattern: /\b(paper|citation|figure|academic)\b/i, reason: "academic workflow", query: "citation" }
+];
 
 export function stripAnsi(value: string): string {
   return value.replace(ansiPattern, "");
@@ -114,28 +152,7 @@ export function parseSkillsFind(output: string): Candidate[] {
 }
 
 export function taskNeedsSkill(task: string): { needed: boolean; reasons: string[] } {
-  const lower = task.toLowerCase();
-  const triggers = [
-    ["ui", "interface design"],
-    ["react", "framework-specific workflow"],
-    ["windows", "platform conventions"],
-    ["winui", "platform conventions"],
-    ["accessibility", "accessibility review"],
-    ["pdf", "document workflow"],
-    ["docx", "document workflow"],
-    ["excel", "spreadsheet workflow"],
-    ["spreadsheet", "spreadsheet workflow"],
-    ["powerpoint", "presentation workflow"],
-    ["github", "GitHub workflow"],
-    ["gmail", "mail workflow"],
-    ["hugging face", "ML platform workflow"],
-    ["fine-tune", "ML training workflow"],
-    ["paper", "academic workflow"],
-    ["citation", "academic citation workflow"],
-    ["figure", "scientific figure workflow"],
-    ["dashboard", "product UI workflow"]
-  ];
-  const reasons = triggers.filter(([word]) => lower.includes(word)).map(([, reason]) => reason);
+  const reasons = needRules.filter((rule) => rule.pattern.test(task)).map((rule) => rule.reason);
   // ponytail: keyword gate; replace with model scoring when false negatives matter.
   return { needed: reasons.length > 0, reasons: [...new Set(reasons)] };
 }
@@ -143,14 +160,12 @@ export function taskNeedsSkill(task: string): { needed: boolean; reasons: string
 export function dedupeCandidates(candidates: Candidate[]): Candidate[] {
   const sorted = [...candidates].sort((a, b) => b.installs - a.installs);
   const kept: Candidate[] = [];
+  const seen = new Set<string>();
   for (const candidate of sorted) {
-    const tokens = skillTokens(candidate.source);
-    const covered = kept.some((item) => {
-      const existing = skillTokens(item.source);
-      const overlap = [...tokens].filter((token) => existing.has(token)).length;
-      return overlap >= Math.min(tokens.size, existing.size, 2);
-    });
-    if (!covered) kept.push(candidate);
+    const key = candidate.source.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    kept.push(candidate);
   }
   return kept;
 }
@@ -178,7 +193,10 @@ export function recommend(task: string, mode: ThresholdMode = "popular", force =
     throw new Error(`search failed: npx skills find ${query}`);
   }
   const minInstalls = thresholdForMode(mode);
-  const candidates = dedupeCandidates(parseSkillsFind(raw).filter((item) => item.installs >= minInstalls)).slice(0, 3);
+  const candidates = dedupeCandidates(parseSkillsFind(raw).filter((item) => item.installs >= minInstalls))
+    .map((item) => scoreCandidate(task, item))
+    .sort((a, b) => (b.fit * 2 + b.trust) - (a.fit * 2 + a.trust) || b.installs - a.installs)
+    .slice(0, 3);
   if (candidates.length === 0) {
     return [
       "Skill Gate analysis",
@@ -190,12 +208,15 @@ export function recommend(task: string, mode: ThresholdMode = "popular", force =
 
   return [
     "Skill Gate analysis",
-    gate.reasons.length ? `External expertise may help with: ${gate.reasons.join(", ")}` : "Forced search: keyword gate did not find a built-in reason.",
+    gate.reasons.length ? `Heuristic fit reasons: ${gate.reasons.join(", ")}` : "Forced search: keyword gate did not find a built-in reason.",
     "",
     "Recommended skills",
     ...candidates.map((item, index) => [
       `${index + 1}. ${item.source}`,
       `   Installs: ${item.installs.toLocaleString()}`,
+      `   Fit: ${item.fit}/100; Trust: ${item.trust}/100`,
+      `   Tags: ${item.tags.length ? item.tags.join(", ") : "unknown"}`,
+      `   Why: ${item.reason}`,
       item.url ? `   Catalog: ${item.url}` : undefined,
       `   Next: skill-gate inspect ${item.source}`
     ].filter(Boolean).join("\n"))
@@ -341,11 +362,11 @@ export function auditSkill(skillDir: string): Audit {
 
 export function inspectSource(source: string, options: InspectOptions = {}): { sessionDir: string; audit: Audit; manifest: Manifest } {
   const cwd = resolve(options.cwd || process.cwd());
-  const sessionId = options.sessionId || timestamp();
-  const sessionDir = join(cwd, ".skill-gate", "sessions", sessionId);
-  const skillsDir = join(sessionDir, "skills");
+  let sessionDir = "";
   try {
-    mkdirSync(skillsDir, { recursive: true });
+    sessionDir = createSessionDir(cwd, options.sessionId);
+    const skillsDir = join(sessionDir, "skills");
+    mkdirSync(skillsDir);
 
     let sourceSkillDir: string;
     let commitSha = "local";
@@ -358,7 +379,7 @@ export function inspectSource(source: string, options: InspectOptions = {}): { s
       const repoDir = join(sessionDir, "repo");
       if (parsed.ref) {
         run("git", ["clone", "--quiet", parsed.repoUrl, repoDir], cwd);
-        run("git", ["-C", repoDir, "checkout", "--quiet", parsed.ref], cwd);
+        run("git", ["-C", repoDir, "checkout", "--quiet", "--detach", parsed.ref], cwd);
       } else {
         run("git", ["clone", "--depth", "1", "--quiet", parsed.repoUrl, repoDir], cwd);
       }
@@ -388,18 +409,27 @@ export function inspectSource(source: string, options: InspectOptions = {}): { s
 
     return { sessionDir, audit, manifest };
   } catch (error) {
-    if (existsSync(sessionDir)) rmSync(sessionDir, { recursive: true, force: true });
+    if (sessionDir && existsSync(sessionDir)) rmSync(sessionDir, { recursive: true, force: true });
     throw error;
   }
 }
 
 export function inspectText(source: string, options: InspectOptions = {}): string {
   const { sessionDir, audit, manifest } = inspectSource(source, options);
+  const scores = decisionScores(audit, manifest, options.task);
   return [
     "Package inspection",
     `Session: ${sessionDir}`,
     `Source: ${manifest.source}`,
     `Pinned commit: ${manifest.commitSha}`,
+    "",
+    "Decision:",
+    `Fit: ${scores.fit}/100`,
+    `Trust: ${scores.trust}/100`,
+    `Risk: ${scores.risk}/100`,
+    `Maintenance: ${scores.maintenance}/100`,
+    `Verdict: ${scores.verdict}`,
+    ...scores.notes.map((note) => `- ${note}`),
     "",
     "Files:",
     ...audit.files.map((file) => `- ${file}`),
@@ -422,6 +452,33 @@ export function inspectText(source: string, options: InspectOptions = {}): strin
   ].join("\n");
 }
 
+function decisionScores(audit: Audit, manifest: Manifest, task?: string): DecisionScores {
+  const skillText = `${manifest.source} ${audit.skill} ${audit.files.join(" ")}`;
+  const taskTags = task ? capabilityTags(task) : [];
+  const skillTags = capabilityTags(skillText);
+  const overlap = skillTags.filter((tag) => taskTags.includes(tag));
+  const fit = task ? Math.min(100, 35 + overlap.length * 25) : 50;
+  const trust = trustScore(manifest.installCount);
+  const risk = audit.risk === "HIGH" ? 90 : audit.risk === "MEDIUM" ? 45 : 10;
+  const maintenance = Math.max(20, Math.min(80,
+    70 -
+    audit.capabilities.largeFiles.length * 10 -
+    audit.capabilities.binaryFiles.length * 5 -
+    audit.capabilities.hiddenFiles.length * 5
+  ));
+  const notes = [
+    task ? (overlap.length ? `Fit tags: ${overlap.join(", ")}` : "No task tag matched; benefit is weak.") : "Fit is unknown; pass --task to score usefulness.",
+    manifest.installCount === null ? "Trust uses no install count; source metadata is unknown." : `Trust uses ${manifest.installCount.toLocaleString()} installs.`,
+    "Risk score is severity; lower is safer.",
+    "Maintenance is package hygiene only; archived/license/update metadata still requires a source metadata check."
+  ];
+  let verdict = "Usable once after approval.";
+  if (audit.risk === "HIGH") verdict = "Reject for use; view-only.";
+  else if (task && fit < 50) verdict = "Skip unless the user has a specific reason.";
+  else if (trust < 50) verdict = "Inspect manually; trust signal is weak.";
+  return { fit, trust, risk, maintenance, verdict, notes };
+}
+
 export function useText(source: string, approved: boolean, cwd = process.cwd()): string {
   if (!approved) {
     throw new Error("Refusing to use this skill without approval. Rerun with --approve after the user confirms.");
@@ -429,7 +486,9 @@ export function useText(source: string, approved: boolean, cwd = process.cwd()):
   const inspected = latestInspectedSession(source, cwd);
   if (!inspected) throw new Error(`No inspected session for ${source}. Run inspect first, then approve use.`);
   if (inspected.manifest.risk === "HIGH") throw new Error("HIGH risk skills are view-only in v1. Use view to inspect files; scripts are not loaded or installed.");
-  approveManifest(inspected);
+  if (inspected.manifest.usedAt) throw new Error(`Temporary approval already used at ${inspected.manifest.usedAt}. Run inspect again for a fresh one-time approval.`);
+  if (inspected.manifest.expiresAt && Date.parse(inspected.manifest.expiresAt) <= Date.now()) throw new Error(`Temporary approval expired at ${inspected.manifest.expiresAt}. Run inspect again.`);
+  useManifest(inspected);
   const { manifest, path } = inspected;
   const sessionDir = dirname(path);
   return [
@@ -437,7 +496,8 @@ export function useText(source: string, approved: boolean, cwd = process.cwd()):
     `Read: ${join(sessionDir, "skills", manifest.skill, "SKILL.md")}`,
     `Pinned commit: ${manifest.commitSha}`,
     `Risk: ${manifest.risk}`,
-    manifest.risk === "HIGH" ? "V1 rule: view only; do not execute scripts." : "Use once, then run cleanup."
+    `Expires: ${manifest.expiresAt}`,
+    "Use once, then run cleanup."
   ].join("\n");
 }
 
@@ -480,11 +540,17 @@ export function installText(source: string, approved: boolean, cwd = process.cwd
 export function packText(packName = `pack-${timestamp()}`, cwd = process.cwd()): string {
   const manifests = readManifests(cwd);
   if (manifests.length === 0) return "No temporary Skill Gate sessions to pack.";
-  const safeName = packName.replace(/[^a-zA-Z0-9_.-]/g, "-");
-  const packDir = join(resolve(cwd), ".skill-gate", "packs", safeName);
-  mkdirSync(join(packDir, "skills"), { recursive: true });
+  const safeName = validatePackName(packName);
+  const packDir = safeChildPath(join(resolve(cwd), ".skill-gate", "packs"), safeName);
+  if (existsSync(packDir)) throw new Error(`Pack already exists: ${safeName}`);
   for (const { manifest, path } of manifests) {
     if (manifest.risk === "HIGH") throw new Error(`Refusing to pack HIGH risk skill: ${manifest.skill}`);
+    const skillName = validateSkillName(manifest.skill);
+    const skillDir = safeChildPath(join(dirname(path), "skills"), skillName);
+    if (!existsSync(skillDir)) continue;
+  }
+  mkdirSync(join(packDir, "skills"), { recursive: true });
+  for (const { manifest, path } of manifests) {
     const skillName = validateSkillName(manifest.skill);
     const skillDir = safeChildPath(join(dirname(path), "skills"), skillName);
     if (existsSync(skillDir)) cpSync(skillDir, safeChildPath(join(packDir, "skills"), skillName), { recursive: true });
@@ -511,33 +577,54 @@ export function statusText(cwd = process.cwd()): string {
       `  Source: ${manifest.source}`,
       `  Risk: ${manifest.risk}`,
       `  Approved: ${yesNo(manifest.approvedByUser)}`,
+      manifest.usedAt ? `  Used: ${manifest.usedAt}` : undefined,
+      manifest.expiresAt ? `  Expires: ${manifest.expiresAt}` : undefined,
       `  Manifest: ${path}`
-    ].join("\n"))
+    ].filter(Boolean).join("\n"))
   ].join("\n");
 }
 
 export function cleanupSessions(cwd = process.cwd(), approved = false): string {
-  if (!approved) throw new Error("Cleanup requires user approval. Ask whether to delete temporary Skill Gate sessions, then rerun cleanup --approve.");
   const manifests = readManifests(cwd);
   if (manifests.length === 0) return "No temporary Skill Gate sessions to clean.";
   const root = join(resolve(cwd), ".skill-gate");
+  const targets = cleanupTargets(cwd, manifests);
+  if (!approved) {
+    return [
+      `Cleanup preview: ${targets.length} manifest-owned path(s).`,
+      ...targets.map((file) => `- ${file}`),
+      "Rerun cleanup --approve to delete them."
+    ].join("\n");
+  }
   const removed: string[] = [];
-  for (const { manifest } of manifests) {
-    for (const file of manifest.createdFiles) {
-      safeRemove(root, resolve(cwd, file));
-      removed.push(file);
-    }
+  for (const file of targets) {
+    safeRemove(root, resolve(cwd, file));
+    removed.push(file);
   }
   return [`Removed ${removed.length} manifest-owned path(s).`, ...removed.map((file) => `- ${file}`)].join("\n");
 }
 
 export function safeRemove(root: string, target: string): void {
+  const safeTarget = safeSkillGateTarget(root, target);
+  if (existsSync(safeTarget)) rmSync(safeTarget, { recursive: true, force: true });
+}
+
+function cleanupTargets(cwd: string, manifests: Array<{ manifest: Manifest; path: string }>): string[] {
+  const root = join(resolve(cwd), ".skill-gate");
+  return manifests.flatMap(({ manifest }) => manifest.createdFiles.map((file) => {
+    safeSkillGateTarget(root, resolve(cwd, file));
+    return file;
+  }));
+}
+
+function safeSkillGateTarget(root: string, target: string): string {
   const safeRoot = resolve(root);
   const safeTarget = resolve(target);
-  if (safeTarget === safeRoot || (!safeTarget.startsWith(safeRoot + "\\" ) && !safeTarget.startsWith(safeRoot + "/"))) {
+  const rel = relative(safeRoot, safeTarget);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) {
     throw new Error(`Refusing to remove outside .skill-gate: ${safeTarget}`);
   }
-  if (existsSync(safeTarget)) rmSync(safeTarget, { recursive: true, force: true });
+  return safeTarget;
 }
 
 export function diffText(source: string, cwd = process.cwd()): string {
@@ -561,7 +648,7 @@ function main(): void {
     }
     if (command === "inspect") {
       requireSource(args[0]);
-      console.log(inspectText(args[0]));
+      console.log(inspectText(args[0], { task: optionValue(args, "--task") }));
       return;
     }
     if (command === "delegate") {
@@ -618,14 +705,14 @@ function helpText(): string {
     "Usage:",
     "  skill-gate recommend \"<task>\" [--mode trusted|popular|explorer] [--force]",
     "  skill-gate delegate \"<task>\"",
-    "  skill-gate inspect <owner/repo@skill|github-url|local-path>",
+    "  skill-gate inspect <owner/repo@skill[#commit]|github-url|local-path> [--task \"<task>\"]",
     "  skill-gate use <source> --approve",
     "  skill-gate view <source>",
     "  skill-gate install <source> --approve",
     "  skill-gate reject [source]",
     "  skill-gate pack [name]",
     "  skill-gate status",
-    "  skill-gate cleanup --approve",
+    "  skill-gate cleanup [--approve]",
     "  skill-gate diff <owner/repo@skill>"
   ].join("\n");
 }
@@ -637,7 +724,7 @@ export function parseSkillSource(source: string): ParsedSource {
     if (parts.length < 3) throw new Error(`Expected skills.sh URL like https://skills.sh/owner/repo/skill, got: ${source}`);
     const [owner, repo, ...skillParts] = parts;
     const skill = skillParts.join("/");
-    return { owner, repo, repoUrl: `https://github.com/${owner}/${repo}.git`, skill };
+    return { owner, repo, repoUrl: `https://github.com/${owner}/${repo}.git`, skill, ref: url.hash ? validateCommitRef(decodeURIComponent(url.hash.slice(1))) : undefined };
   }
   if (source.startsWith("https://github.com/")) {
     const url = new URL(source);
@@ -646,17 +733,19 @@ export function parseSkillSource(source: string): ParsedSource {
     const owner = parts[0];
     const repo = parts[1].replace(/\.git$/, "");
     const treeIndex = parts.indexOf("tree");
-    const ref = treeIndex >= 0 ? parts[treeIndex + 1] : undefined;
+    const ref = treeIndex >= 0 ? parts[treeIndex + 1] : (url.hash ? validateCommitRef(decodeURIComponent(url.hash.slice(1))) : undefined);
     const path = treeIndex >= 0 ? parts.slice(treeIndex + 2).join("/") : undefined;
     return { owner, repo, repoUrl: `https://github.com/${owner}/${repo}.git`, ref, path, skill: path ? basename(path) : undefined };
   }
-  const match = source.match(/^([^/@]+)\/([^/@]+)@(.+)$/);
+  const [body, ref] = splitFragment(source);
+  const match = body.match(/^([^/@]+)\/([^/@]+)@(.+)$/);
   if (!match) throw new Error(`Expected source like owner/repo@skill or https://github.com/owner/repo/tree/ref/path, got: ${source}`);
   return {
     owner: match[1],
     repo: match[2],
     repoUrl: `https://github.com/${match[1]}/${match[2]}.git`,
-    skill: match[3]
+    skill: match[3],
+    ref
   };
 }
 
@@ -671,6 +760,24 @@ function parseMode(args: string[]): ThresholdMode {
     throw new Error(`unknown mode: ${value}`);
   }
   return "popular";
+}
+
+function optionValue(args: string[], name: string): string | undefined {
+  const index = args.indexOf(name);
+  return index >= 0 ? args[index + 1] : undefined;
+}
+
+function splitFragment(value: string): [string, string?] {
+  const index = value.lastIndexOf("#");
+  if (index < 0) return [value, undefined];
+  const ref = value.slice(index + 1).trim();
+  if (!ref) throw new Error(`Empty commit/ref fragment in source: ${value}`);
+  return [value.slice(0, index), validateCommitRef(ref)];
+}
+
+function validateCommitRef(ref: string): string {
+  if (!/^[0-9a-f]{40}$/i.test(ref)) throw new Error(`Expected 40-hex commit SHA, got: ${ref}`);
+  return ref;
 }
 
 function findSkillDir(repoDir: string, skill?: string): string {
@@ -756,6 +863,15 @@ function approveManifest(match: { manifest: Manifest; path: string }): void {
   writeJson(match.path, match.manifest);
 }
 
+function useManifest(match: { manifest: Manifest; path: string }): void {
+  const now = new Date().toISOString();
+  match.manifest.approvedByUser = true;
+  match.manifest.approvedAt ||= now;
+  match.manifest.usedAt = now;
+  match.manifest.expiresAt = now;
+  writeJson(match.path, match.manifest);
+}
+
 function run(command: string, args: string[], cwd: string, allowFailure = false): string {
   const actual = command === "git" && process.platform === "win32" ? "git.exe" : command;
   try {
@@ -776,6 +892,11 @@ function validateSkillName(name: string): string {
     throw new Error(`Invalid skill name: ${name}`);
   }
   return name;
+}
+
+function validatePackName(name: string): string {
+  if (!name) throw new Error("Invalid pack name: empty");
+  return validateSkillName(name);
 }
 
 function safeChildPath(parent: string, childName: string): string {
@@ -862,34 +983,52 @@ function isTextish(file: string): boolean {
   return /\.(md|txt|yaml|yml|json|js|mjs|cjs|ts|tsx|jsx|sh|bash|zsh|ps1|bat|cmd|py)$/i.test(file);
 }
 
-function skillTokens(source: string): Set<string> {
-  const name = source.split("@").pop() || source;
-  const stop = new Set(["skill", "skills", "helper", "best", "practices"]);
-  return new Set(name.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token.length > 2 && !stop.has(token)));
+function scoreCandidate(task: string, candidate: Candidate): ScoredCandidate {
+  const tags = capabilityTags(candidate.source);
+  const taskTags = capabilityTags(task);
+  const overlap = tags.filter((tag) => taskTags.includes(tag));
+  const fit = Math.min(100, 35 + overlap.length * 25 + (candidate.source.toLowerCase().includes(queryForTask(task).toLowerCase()) ? 15 : 0));
+  const trust = trustScore(candidate.installs);
+  return {
+    ...candidate,
+    fit,
+    trust,
+    tags,
+    reason: overlap.length ? `matches ${overlap.join(", ")}` : "install-trusted candidate; inspect before use"
+  };
+}
+
+function trustScore(installs: number | null | undefined): number {
+  if (!installs) return 45;
+  if (installs >= 100000) return 90;
+  if (installs >= 10000) return 80;
+  if (installs >= 1000) return 65;
+  return 45;
+}
+
+function capabilityTags(value: string): string[] {
+  const lower = value.toLowerCase();
+  const tags: string[] = [];
+  const rules: Array<[RegExp, string]> = [
+    [/\b(react|next|jsx|tsx)\b/, "react"],
+    [/\b(ui|ux|design|components?|frontend|dashboard|screen)\b/, "ui"],
+    [/\b(perf|performance|speed|render|rerender|bundle)\b/, "performance"],
+    [/\b(accessibility|a11y)\b/, "accessibility"],
+    [/\b(github|pull request|pr|issue|ci)\b/, "github"],
+    [/\b(pdf|docx|document|spreadsheet|excel|ppt|powerpoint)\b/, "documents"],
+    [/\b(test|qa|review|lint)\b/, "quality"],
+    [/\b(data|api|database|backend|server)\b/, "backend"],
+    [/\b(hugging face|model|fine.?tune|training|ml)\b/, "ml"],
+    [/\b(citation|paper|figure|academic)\b/, "academic"]
+  ];
+  for (const [pattern, tag] of rules) {
+    if (pattern.test(lower)) tags.push(tag);
+  }
+  return [...new Set(tags)];
 }
 
 function queryForTask(task: string): string {
-  const lower = task.toLowerCase();
-  const choices: Array<[string, string]> = [
-    ["react", "react"],
-    ["windows", "windows"],
-    ["winui", "winui"],
-    ["accessibility", "accessibility"],
-    ["dashboard", "dashboard"],
-    ["ui", "design"],
-    ["pdf", "pdf"],
-    ["docx", "docx"],
-    ["excel", "excel"],
-    ["spreadsheet", "spreadsheet"],
-    ["powerpoint", "powerpoint"],
-    ["github", "github"],
-    ["gmail", "gmail"],
-    ["hugging face", "hugging face"],
-    ["fine-tune", "fine tune"],
-    ["citation", "citation"],
-    ["figure", "figure"]
-  ];
-  return choices.find(([needle]) => lower.includes(needle))?.[1] || task.split(/\s+/).slice(0, 4).join(" ");
+  return needRules.find((rule) => rule.pattern.test(task))?.query || task.split(/\s+/).slice(0, 4).join(" ");
 }
 
 function delegationLanes(task: string): Lane[] {
@@ -961,8 +1100,29 @@ function writeJson(file: string, value: unknown): void {
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+function createSessionDir(cwd: string, requestedId?: string): string {
+  const root = join(resolve(cwd), ".skill-gate", "sessions");
+  mkdirSync(root, { recursive: true });
+  if (requestedId) {
+    const sessionDir = safeChildPath(root, requestedId);
+    mkdirSync(sessionDir);
+    return sessionDir;
+  }
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const sessionDir = safeChildPath(root, timestamp());
+    try {
+      mkdirSync(sessionDir);
+      return sessionDir;
+    } catch (error) {
+      if ((error as { code?: string }).code === "EEXIST") continue;
+      throw error;
+    }
+  }
+  throw new Error("Could not create a unique Skill Gate session.");
+}
+
 function timestamp(): string {
-  return new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "").replace("T", "-");
+  return `${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "").replace("T", "-")}-${randomBytes(3).toString("hex")}`;
 }
 
 function toPosix(value: string): string {

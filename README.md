@@ -46,17 +46,22 @@ With Skill Gate:
 Recommended skills
 1. vercel-labs/agent-skills@vercel-react-best-practices
    Installs: 497,300
-   Next: inspect before use
+   Fit: 100/100; Trust: 90/100
+   Next: skill-gate inspect vercel-labs/agent-skills@vercel-react-best-practices
 ```
 
 Then it opens the package before Codex trusts it:
 
 ```text
 Pinned commit: f8a72b9603728bb92a217a879b7e62e43ad76c81
+Fit: 75/100
+Trust: 45/100
+Risk: 90/100
+Maintenance: 70/100
+Verdict: Reject for use; view-only.
 Executable scripts: No
 Environment variables: Yes
 Risk: HIGH
-V1 rule: view only; do not execute scripts.
 ```
 
 No approval, no load.
@@ -95,17 +100,17 @@ Local checkout examples use `node dist/src/cli.js <command>`. If the package bin
 | Command | What it does |
 |---|---|
 | `recommend "<task>"` | Search real skill sources and return 0 to 3 candidates. |
-| `inspect <source>` | Copy or clone a skill into `.skill-gate/sessions/<id>/` and audit it. |
-| `use <source> --approve` | Mark the inspected pinned session approved for one temporary use. |
+| `inspect <source> [--task "<task>"]` | Copy or clone a skill into `.skill-gate/sessions/<id>/`, audit it, and show a decision page. |
+| `use <source> --approve` | Consume the inspected pinned session for one temporary use. |
 | `view <source>` | Download for review without approval. |
 | `install <source> --approve` | Keep the inspected pinned files in this project. |
 | `delegate "<task>"` | Produce a multi-agent split plan without spawning agents or touching files. |
 | `status` | Show temporary sessions and approval state. |
 | `pack [name]` | Save current sessions as a reusable pack. |
-| `cleanup --approve` | Delete only manifest-owned paths inside `.skill-gate`. |
+| `cleanup [--approve]` | Preview, then delete only manifest-owned paths inside `.skill-gate` with approval. |
 | `diff <source>` | Compare the pinned commit with current remote HEAD. |
 
-Sources can be local paths, `owner/repo@skill`, GitHub repo URLs, or GitHub tree URLs such as `https://github.com/org/repo/tree/main/path/to/skill`.
+Sources can be local paths, `owner/repo@skill`, `owner/repo@skill#<40-hex-commit>`, GitHub repo URLs, or GitHub tree URLs such as `https://github.com/org/repo/tree/main/path/to/skill`.
 
 ## Risk
 
@@ -138,7 +143,7 @@ Chinese usage notes: [USAGE.md](USAGE.md).
 npm test
 ```
 
-The test is small on purpose: parser, thresholds, delegation, dedupe, risk scan, pinned-session approval, pack, and cleanup guard.
+The test is small on purpose: parser, thresholds, delegation, dedupe, risk scan, one-time use, pack, session, and cleanup guards.
 
 ## License
 

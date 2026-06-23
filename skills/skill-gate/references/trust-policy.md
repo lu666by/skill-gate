@@ -10,6 +10,6 @@ Default mode is Popular:
 - Popular: at least 1000 installs.
 - Explorer: no install threshold; still requires inspect and explicit use/install approval.
 
-V1 enforces install thresholds and lightweight deduplication. Archived, publisher, updated/stale, compatibility, and description-vs-content checks are manual review items for now.
+V1 enforces install thresholds and exact-source deduplication. Archived, publisher, updated/stale, license, compatibility, and description-vs-content checks need a source metadata provider; until then they must be treated as unknown instead of inferred.
 
-Recommend at most 3 skills. Deduplicate overlapping skills and keep the broader useful one.
+Recommend at most 3 skills. Do not collapse different capability names unless the source string is exactly duplicated.

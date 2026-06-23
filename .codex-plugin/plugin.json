@@ -1,0 +1,22 @@
+{
+  "name": "skill-gate",
+  "version": "0.1.0",
+  "description": "Find useful agent skills and inspect them before Codex uses them.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Skill Gate",
+    "shortDescription": "Audit external skills before use.",
+    "longDescription": "Skill Gate helps Codex decide whether an external skill is worth using, inspect the package contents, pin the source version, and keep use temporary by default.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Write"],
+    "defaultPrompt": [
+      "Use Skill Gate before adding an external skill.",
+      "Find and inspect a skill for this task.",
+      "Clean up temporary Skill Gate sessions."
+    ]
+  }
+}

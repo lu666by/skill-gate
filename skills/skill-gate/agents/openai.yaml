@@ -1,0 +1,4 @@
+interface:
+  display_name: "Skill Gate"
+  short_description: "Audit external skills before use"
+  default_prompt: "Use $skill-gate to decide whether this task needs an external skill."

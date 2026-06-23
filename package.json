@@ -1,0 +1,18 @@
+{
+  "name": "skill-gate",
+  "version": "0.1.0",
+  "description": "Find useful agent skills and inspect them before Codex uses them.",
+  "license": "MIT",
+  "type": "commonjs",
+  "bin": {
+    "skill-gate": "./dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node dist/tests/self-check.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "typescript": "^5.5.4"
+  }
+}
